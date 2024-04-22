@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+global-hotkey = "0.5.1"
+tray-icon = "0.13.4"
+winit = "0.29.15"
