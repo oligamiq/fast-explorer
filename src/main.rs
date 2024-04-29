@@ -1,15 +1,57 @@
-use global_hotkey::{
-    hotkey::{Code, HotKey, Modifiers},
-    GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
-};
-use tray_icon::{menu::Menu, TrayIconBuilder};
-use winit::event_loop::{ControlFlow, EventLoopBuilder};
+use winit::application::ApplicationHandler;
+use winit::event::{DeviceEvent, DeviceId, Event, WindowEvent};
+use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winit::window::{Window, WindowId};
+
+#[derive(Default)]
+struct State {
+    // Use an `Option` to allow the window to not be available until the
+    // application is properly running.
+    window: Option<Window>,
+    counter: i32,
+}
+
+impl ApplicationHandler for State {
+    // This is a common indicator that you can create a window.
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        self.window = Some(
+            event_loop
+                .create_window(Window::default_attributes())
+                .unwrap(),
+        );
+    }
+
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window_id: WindowId,
+        event: WindowEvent,
+    ) {
+        // `unwrap` is fine, the window will always be available when
+        // receiving a window event.
+        let window = self.window.as_ref().unwrap();
+        // Handle window event.
+    }
+
+    fn device_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        device_id: DeviceId,
+        event: DeviceEvent,
+    ) {
+        // Handle window event.
+
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(window) = self.window.as_ref() {
+            window.request_redraw();
+            self.counter += 1;
+        }
+    }
+}
 
 fn main() {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/icon.png");
-
-    let event_loop = EventLoopBuilder::new().build().unwrap();
-
     let hotkeys_manager = GlobalHotKeyManager::new().unwrap();
 
     let hotkey = HotKey::new(Some(Modifiers::SHIFT), Code::KeyD);
@@ -22,25 +64,7 @@ fn main() {
 
     let global_hotkey_channel = GlobalHotKeyEvent::receiver();
 
-    event_loop
-        .run(move |_event, event_loop| {
-            event_loop.set_control_flow(ControlFlow::Poll);
-
-            if let Ok(event) = global_hotkey_channel.try_recv() {
-                println!("{event:?}");
-
-                if hotkey2.id() == event.id && event.state == HotKeyState::Released {
-                    hotkeys_manager.unregister(hotkey2).unwrap();
-                }
-            }
-        })
-        .unwrap();
-
-    let tray_menu = Menu::new();
-    let tray_icon = TrayIconBuilder::new()
-        .with_menu(Box::new(tray_menu))
-        .with_tooltip("system-tray - tray icon library!")
-        .with_icon(icon)
-        .build()
-        .unwrap();
+    let event_loop = EventLoop::new().unwrap();
+    let mut state = State::default();
+    let _ = event_loop.run_app(&mut state);
 }

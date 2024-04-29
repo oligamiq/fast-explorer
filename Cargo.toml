@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-global-hotkey = "0.5.1"
-tray-icon = "0.13.4"
-winit = "0.29.15"
+global-hotkey = "0.5"
+image = "0.25"
+parking_lot = { version = "0.12", features = ["arc_lock"] }
+tray-icon = "0.13"
+winit = "0.30"
