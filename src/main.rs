@@ -23,11 +23,12 @@ fn main() {
     let global_hotkey_channel = GlobalHotKeyEvent::receiver();
 
     event_loop
-        .run(move |_event, event_loop| {
+        .run(move |n_event, event_loop| {
             event_loop.set_control_flow(ControlFlow::Poll);
 
             if let Ok(event) = global_hotkey_channel.try_recv() {
                 println!("{event:?}");
+                println!("n_event: {:?}", n_event);
 
                 if hotkey2.id() == event.id && event.state == HotKeyState::Released {
                     hotkeys_manager.unregister(hotkey2).unwrap();
@@ -36,11 +37,11 @@ fn main() {
         })
         .unwrap();
 
-    let tray_menu = Menu::new();
-    let tray_icon = TrayIconBuilder::new()
-        .with_menu(Box::new(tray_menu))
-        .with_tooltip("system-tray - tray icon library!")
-        .with_icon(icon)
-        .build()
-        .unwrap();
+    // let tray_menu = Menu::new();
+    // let tray_icon = TrayIconBuilder::new()
+    //     .with_menu(Box::new(tray_menu))
+    //     .with_tooltip("system-tray - tray icon library!")
+    //     .with_icon(icon)
+    //     .build()
+    //     .unwrap();
 }
