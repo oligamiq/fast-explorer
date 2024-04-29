@@ -8,4 +8,5 @@ global-hotkey = "0.5"
 image = "0.25"
 parking_lot = { version = "0.12", features = ["arc_lock"] }
 tray-icon = "0.13"
+windows = { version = "0.56.0", features = ["UI_WindowManagement_Preview", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Dwm"]}
 winit = "0.30"
