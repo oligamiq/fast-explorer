@@ -182,7 +182,7 @@ fn hit_test_nca(hwnd: HWND, w_param: WPARAM, l_param: LPARAM) -> LRESULT {
 // const BOTTOMEXTENDWIDTH: i32 = 20;
 // const TOPEXTENDWIDTH: i32 = 27;
 const LEFTEXTENDWIDTH: i32 = 0;
-const RIGHTEXTENDWIDTH: i32 = 20;
+const RIGHTEXTENDWIDTH: i32 = 50;
 const BOTTOMEXTENDWIDTH: i32 = 0;
 const TOPEXTENDWIDTH: i32 = 40;
 // pub const LEFTEXTENDWIDTH: i32 = 0;
