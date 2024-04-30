@@ -73,14 +73,14 @@ impl WindowWrapper {
         let caption_rect = unsafe { get_caption_button_rect(hwnd.0) };
         println!("caption_rect -1: top: {}, left: {}, right: {}, bottom: {}", caption_rect.top, caption_rect.left, caption_rect.right, caption_rect.bottom);
 
-        // unsafe {
-        //     SetWindowSubclass(
-        //         hwnd.0,
-        //         Some(wrapper_subclass_prop),
-        //         UIDSUBCLASS,
-        //         &mut window as *mut Window as usize,
-        //     )
-        // };
+        unsafe {
+            SetWindowSubclass(
+                hwnd.0,
+                Some(wrapper_subclass_prop),
+                UIDSUBCLASS,
+                &mut window as *mut Window as usize,
+            )
+        };
 
         let position = window.outer_position().unwrap();
         let rect = window.outer_size();
