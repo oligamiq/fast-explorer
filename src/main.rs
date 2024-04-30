@@ -39,7 +39,7 @@ enum HandledHotKeys {
     ShiftD,
     ShiftAltD,
     MetaShitE,
-    F,
+    // F,
 }
 
 impl State {
@@ -64,6 +64,8 @@ impl State {
 impl ApplicationHandler for State {
     // This is a common indicator that you can create a window.
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        self.window.push(WindowWrapper::new(event_loop));
+
         // println!("Application resumed");
     }
 
@@ -155,12 +157,12 @@ fn main() {
     let hotkey = HotKey::new(Some(Modifiers::SHIFT), Code::KeyD);
     let hotkey2 = HotKey::new(Some(Modifiers::SHIFT | Modifiers::ALT), Code::KeyD);
     let hotkey_meta_shift_e = HotKey::new(Some(Modifiers::META | Modifiers::SHIFT), Code::KeyE);
-    let hotkey3 = HotKey::new(None, Code::KeyF);
+    // let hotkey3 = HotKey::new(None, Code::KeyF);
 
     hotkeys_manager.register(hotkey).unwrap();
     hotkeys_manager.register(hotkey2).unwrap();
     hotkeys_manager.register(hotkey_meta_shift_e).unwrap();
-    hotkeys_manager.register(hotkey3).unwrap();
+    // hotkeys_manager.register(hotkey3).unwrap();
 
     let global_hotkey_channel = GlobalHotKeyEvent::receiver();
 
@@ -168,7 +170,7 @@ fn main() {
     hashmap.insert(HandledHotKeys::ShiftD, hotkey);
     hashmap.insert(HandledHotKeys::ShiftAltD, hotkey2);
     hashmap.insert(HandledHotKeys::MetaShitE, hotkey_meta_shift_e);
-    hashmap.insert(HandledHotKeys::F, hotkey3);
+    // hashmap.insert(HandledHotKeys::F, hotkey3);
 
     let hotkey_struct = HotkeyStruct {
         global_hotkey_channel: global_hotkey_channel.clone(),
@@ -181,5 +183,6 @@ fn main() {
         hotkey_state: Some(hotkey_struct),
         ..Default::default()
     };
+
     let _ = event_loop.run_app(&mut state);
 }

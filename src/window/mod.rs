@@ -5,7 +5,7 @@ use windows_sys::{
     core::HRESULT,
     Win32::{
         Foundation::{FALSE, HWND, LPARAM, LRESULT, RECT, S_OK, WPARAM},
-        Graphics::Dwm::{DwmDefWindowProc, DwmExtendFrameIntoClientArea, DwmGetWindowAttribute, DwmSetWindowAttribute, DWMWA_CAPTION_BUTTON_BOUNDS},
+        Graphics::Dwm::{DwmDefWindowProc, DwmExtendFrameIntoClientArea, DwmGetWindowAttribute, DwmSetWindowAttribute, DWMWA_CAPTION_BUTTON_BOUNDS, DWMWCP_DONOTROUND, DWM_WINDOW_CORNER_PREFERENCE},
         UI::{
             Controls::MARGINS, Shell::DefSubclassProc, WindowsAndMessaging::{
                 AdjustWindowRectEx, GetWindowRect, IsZoomed, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTLEFT, HTMAXBUTTON, HTNOWHERE, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, WM_NCCALCSIZE, WM_NCHITTEST, WM_PAINT, WS_CAPTION, WS_OVERLAPPEDWINDOW
@@ -24,6 +24,8 @@ unsafe extern "system" fn wrapper_subclass_prop(
     uidsubclass: usize,
     dwrefdata: usize,
 ) -> LRESULT {
+    debug_assert_eq!(uidsubclass, UIDSUBCLASS);
+
     let window = dwrefdata as *mut WindowWrapper;
     let window = &mut *window;
 
@@ -67,6 +69,8 @@ unsafe extern "system" fn wrapper_subclass_prop(
         // return 0;
     }
 
+    // if comment out and adjust closing box
+    // why??
     if umsg == WM_NCCALCSIZE && wparam == 1 {
         let params = std::mem::transmute::<
             LPARAM,
@@ -77,12 +81,15 @@ unsafe extern "system" fn wrapper_subclass_prop(
 
         (*params).rgrc[0].top += 0;
         (*params).rgrc[0].left += 0;
-        (*params).rgrc[0].right -= 0;
+        (*params).rgrc[0].right += 0;
         (*params).rgrc[0].bottom += 0;
+        println!("rgrc[0]: top: {}, left: {}, right: {}, bottom: {}", (*params).rgrc[0].top, (*params).rgrc[0].left, (*params).rgrc[0].right, (*params).rgrc[0].bottom);
 
         println!("WM_NCCALCSIZE: {}", lparam as isize);
 
         return 0;
+        // const WVR_REDRAW: isize = 0x0300;
+        // return WVR_REDRAW;
     }
 
     // タップ動作の上書き
@@ -174,14 +181,16 @@ fn hit_test_nca(hwnd: HWND, w_param: WPARAM, l_param: LPARAM) -> LRESULT {
 // const RIGHTEXTENDWIDTH: i32 = 8;
 // const BOTTOMEXTENDWIDTH: i32 = 20;
 // const TOPEXTENDWIDTH: i32 = 27;
-const LEFTEXTENDWIDTH: i32 = -1;
-const RIGHTEXTENDWIDTH: i32 = -1;
+const LEFTEXTENDWIDTH: i32 = 0;
+const RIGHTEXTENDWIDTH: i32 = 20;
 const BOTTOMEXTENDWIDTH: i32 = 0;
-const TOPEXTENDWIDTH: i32 = 20;
+const TOPEXTENDWIDTH: i32 = 40;
 // pub const LEFTEXTENDWIDTH: i32 = 0;
 // pub const RIGHTEXTENDWIDTH: i32 = 0;
 // pub const BOTTOMEXTENDWIDTH: i32 = 0;
 // pub const TOPEXTENDWIDTH: i32 = 0;
+
+// https://learn.microsoft.com/ja-jp/windows/win32/api/dwmapi/ne-dwmapi-dwmwindowattribute
 
 /// get DWMWA_CAPTION_BUTTON_BOUNDS
 #[allow(dead_code)]
@@ -201,10 +210,28 @@ pub unsafe fn get_caption_button_rect(hwnd: HWND) -> RECT {
     if hr != 0 {
         println!("DwmGetWindowAttribute failed: {}", hr);
     } else {
-        println!("DwmGetWindowAttribute succeeded:\ntop: {}\nleft: {}\nright: {}\nbottom: {}", bounds.top, bounds.left, bounds.right, bounds.bottom);
+        // println!("DwmGetWindowAttribute succeeded:\ntop: {}\nleft: {}\nright: {}\nbottom: {}", bounds.top, bounds.left, bounds.right, bounds.bottom);
+        println!("DwmGetWindowAttribute succeeded");
     }
 
     bounds
+}
+
+/// set DWMWA_CAPTION_BUTTON_BOUNDS
+#[allow(dead_code)]
+pub unsafe fn set_caption_button_rect(hwnd: HWND, bounds: RECT) {
+    let mut bounds = bounds.clone();
+    let hr = DwmSetWindowAttribute(
+        hwnd,
+        DWMWA_CAPTION_BUTTON_BOUNDS as u32,
+        &mut bounds as *mut _ as *mut std::ffi::c_void,
+        std::mem::size_of::<RECT>() as u32,
+    );
+    if hr != 0 {
+        println!("DwmSetWindowAttribute caption rect failed: 0x{:0x}", hr);
+    } else {
+        println!("DwmSetWindowAttribute caption rect succeeded:\ntop: {}\nleft: {}\nright: {}\nbottom: {}", bounds.top, bounds.left, bounds.right, bounds.bottom);
+    }
 }
 
 /// get  DWMWA_EXTENDED_FRAME_BOUNDS
@@ -229,4 +256,89 @@ pub unsafe fn get_extended_frame_bounds(hwnd: HWND) -> RECT {
     }
 
     bounds
+}
+
+/// get DWMWA_NCRENDERING_POLICY
+#[allow(dead_code)]
+pub unsafe fn get_nc_rendering_policy(hwnd: HWND) -> HRESULT {
+    let mut policy = 0;
+    let hr = DwmGetWindowAttribute(
+        hwnd,
+        windows_sys::Win32::Graphics::Dwm::DWMWA_NCRENDERING_POLICY as u32,
+        &mut policy as *mut _ as *mut std::ffi::c_void,
+        std::mem::size_of::<i32>() as u32,
+    );
+    if hr != 0 {
+        println!("DwmGetWindowAttribute failed: {}", hr);
+    } else {
+        println!("DwmGetWindowAttribute succeeded: {}", policy);
+    }
+
+    policy
+}
+
+/// set DWMWA_NCRENDERING_POLICY
+#[allow(dead_code)]
+pub unsafe fn set_nc_rendering_policy(hwnd: HWND, policy: i32) {
+    let hr = DwmSetWindowAttribute(
+        hwnd,
+        windows_sys::Win32::Graphics::Dwm::DWMWA_NCRENDERING_POLICY as u32,
+        &policy as *const _ as *const std::ffi::c_void,
+        std::mem::size_of::<i32>() as u32,
+    );
+    if hr != 0 {
+        println!("DwmSetWindowAttribute failed: 0x{:0x}", hr);
+    } else {
+        println!("DwmSetWindowAttribute succeeded: {}", policy);
+    }
+}
+
+/// get DWMWA_ALLOW_NCPAINT
+#[allow(dead_code)]
+pub unsafe fn set_allow_nc_paint(hwnd: HWND, allow: bool) {
+    let allow = if allow { 1 } else { 0 };
+    let hr = DwmSetWindowAttribute(
+        hwnd,
+        windows_sys::Win32::Graphics::Dwm::DWMWA_ALLOW_NCPAINT as u32,
+        &allow as *const _ as *const std::ffi::c_void,
+        std::mem::size_of::<i32>() as u32,
+    );
+    if hr != 0 {
+        println!("DwmSetWindowAttribute failed: 0x{:0x}", hr);
+    } else {
+        println!("DwmSetWindowAttribute succeeded: {}", allow);
+    }
+}
+
+/// set DWMWA_WINDOW_CORNER_PREFERENCE
+#[allow(dead_code)]
+pub unsafe fn set_window_corner_radius(hwnd: HWND, radius: DWM_WINDOW_CORNER_PREFERENCE) {
+    let hr = DwmSetWindowAttribute(
+        hwnd,
+        windows_sys::Win32::Graphics::Dwm::DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+        &radius as *const _ as *const std::ffi::c_void,
+        std::mem::size_of::<f32>() as u32,
+    );
+    if hr != 0 {
+        println!("DwmSetWindowAttribute radius failed: 0x{:0x}", hr);
+    } else {
+        println!("DwmSetWindowAttribute radius succeeded: {}", radius);
+    }
+}
+
+/// set DWMWA_TRANSITIONS_FORCEDISABLED
+#[allow(dead_code)]
+pub unsafe fn set_transitions_force_disabled(hwnd: HWND, disabled: bool) {
+    let disabled = if disabled { 1 } else { 0 };
+    let hr = DwmSetWindowAttribute(
+        hwnd,
+        windows_sys::Win32::Graphics::Dwm::DWMWA_TRANSITIONS_FORCEDISABLED as u32,
+        &disabled as *const _ as *const std::ffi::c_void,
+        std::mem::size_of::<i32>() as u32,
+    );
+    if hr != 0 {
+        println!("DwmSetWindowAttribute disabled failed: 0x{:0x}", hr);
+    } else {
+        println!("DwmSetWindowAttribute disabled succeeded: {}", disabled);
+    }
 }

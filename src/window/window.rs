@@ -19,7 +19,7 @@ use windows::{
 use windows_sys::Win32::{
     Foundation::POINT,
     Graphics::{
-        Dwm::DwmExtendFrameIntoClientArea,
+        Dwm::{DwmExtendFrameIntoClientArea, DWMNCRP_ENABLED, DWMNCRP_USEWINDOWSTYLE},
         Gdi::{
             BeginPaint, BitBlt, CreateCompatibleDC, CreateDIBSection, CreateFontIndirectW,
             DeleteObject, EndPaint, SelectObject, TextOutW, BITMAPINFO, BITMAPINFOHEADER, DT_LEFT,
@@ -41,7 +41,7 @@ use winit::{
     window::{Window, WindowButtons},
 };
 
-use crate::window::{get_caption_button_rect, get_extended_frame_bounds, wrapper_subclass_prop, UIDSUBCLASS};
+use crate::window::{get_caption_button_rect, get_extended_frame_bounds, get_nc_rendering_policy, set_allow_nc_paint, set_nc_rendering_policy, set_transitions_force_disabled, set_window_corner_radius, wrapper_subclass_prop, UIDSUBCLASS};
 
 use super::{BOTTOMEXTENDWIDTH, LEFTEXTENDWIDTH, RIGHTEXTENDWIDTH, TOPEXTENDWIDTH};
 
@@ -64,19 +64,32 @@ impl WindowWrapper {
         let hwnd: u64 = window.id().into();
         let hwnd: HWND = HWND(hwnd as isize);
 
-        unsafe {
-            SetWindowSubclass(
-                hwnd.0,
-                Some(wrapper_subclass_prop),
-                UIDSUBCLASS,
-                &mut window as *mut Window as usize,
-            )
-        };
+        let position = window.outer_position().unwrap();
+        let rect = window.outer_size();
+
+        println!("position: {:?}", position);
+        println!("rect: {:?}", rect);
+
+        let caption_rect = unsafe { get_caption_button_rect(hwnd.0) };
+        println!("caption_rect -1: top: {}, left: {}, right: {}, bottom: {}", caption_rect.top, caption_rect.left, caption_rect.right, caption_rect.bottom);
+
+        // unsafe {
+        //     SetWindowSubclass(
+        //         hwnd.0,
+        //         Some(wrapper_subclass_prop),
+        //         UIDSUBCLASS,
+        //         &mut window as *mut Window as usize,
+        //     )
+        // };
 
         let position = window.outer_position().unwrap();
         let rect = window.outer_size();
 
         println!("position: {:?}", position);
+        println!("rect: {:?}", rect);
+
+        let caption_rect = unsafe { get_caption_button_rect(hwnd.0) };
+        println!("caption_rect 0: top: {}, left: {}, right: {}, bottom: {}", caption_rect.top, caption_rect.left, caption_rect.right, caption_rect.bottom);
 
         let ret = unsafe {
             SetWindowPos(
@@ -86,9 +99,14 @@ impl WindowWrapper {
                 position.y as i32,
                 rect.width as i32,
                 rect.height as i32,
+                // 500,
+                // 500,
                 SWP_FRAMECHANGED,
             )
         };
+
+        let caption_rect = unsafe { get_caption_button_rect(hwnd.0) };
+        println!("caption_rect 1: top: {}, left: {}, right: {}, bottom: {}", caption_rect.top, caption_rect.left, caption_rect.right, caption_rect.bottom);
 
         ret.unwrap();
 
@@ -108,13 +126,30 @@ impl WindowWrapper {
 
         let mut caption_rect = unsafe { get_caption_button_rect(hwnd.0) };
         let window_rect = unsafe { get_extended_frame_bounds(hwnd.0) };
-        println!("caption_rect: top: {}, left: {}, right: {}, bottom: {}", caption_rect.top, caption_rect.left, caption_rect.right, caption_rect.bottom);
+        println!("caption_rect 2: top: {}, left: {}, right: {}, bottom: {}", caption_rect.top, caption_rect.left, caption_rect.right, caption_rect.bottom);
         let window_width = window_rect.right - window_rect.left;
         let diff = window_width - caption_rect.right;
+        dbg!(diff);
         caption_rect.left += diff;
         caption_rect.right += diff;
         caption_rect.bottom = caption_rect.top + TOPEXTENDWIDTH;
-        // unsafe { set_caption_button_rect(hwnd.0, caption_rect) } ;
+
+        // 一応
+        // unsafe {
+        //     set_allow_nc_paint(hwnd.0, true);
+        // }
+
+        unsafe { set_window_corner_radius(hwnd.0, windows_sys::Win32::Graphics::Dwm::DWMWCP_DONOTROUND) };
+
+        // unsafe { set_transitions_force_disabled(hwnd.0, true) };
+
+        // let policy = unsafe { get_nc_rendering_policy(hwnd.0) };
+        // println!("policy: {:?}", policy);
+        // dbg!(DWMNCRP_USEWINDOWSTYLE);
+        // unsafe { set_nc_rendering_policy(hwnd.0, DWMNCRP_ENABLED) };
+
+        unsafe { crate::window::set_caption_button_rect(hwnd.0, caption_rect) };
+
         // println!("window_rect: top: {}, left: {}, right: {}, bottom: {}", window_rect.top, window_rect.left, window_rect.right, window_rect.bottom);
         // println!("window_width: {}", window_width);
 
@@ -148,9 +183,20 @@ impl WindowWrapper {
         let hwnd: windows::Win32::Foundation::HWND =
             windows::Win32::Foundation::HWND(hwnd as isize);
 
+        let mut caption_rect = unsafe { get_caption_button_rect(hwnd.0) };
+        let window_rect = unsafe { get_extended_frame_bounds(hwnd.0) };
+        println!("caption_rect: top: {}, left: {}, right: {}, bottom: {}", caption_rect.top, caption_rect.left, caption_rect.right, caption_rect.bottom);
+        let window_width = window_rect.right - window_rect.left;
+        let diff = window_width - caption_rect.right;
+        dbg!(diff);
+        caption_rect.left += diff;
+        caption_rect.right += diff;
+        caption_rect.bottom = caption_rect.top + TOPEXTENDWIDTH;
+        unsafe { crate::window::set_caption_button_rect(hwnd.0, caption_rect) };
+
         let rect = self.window.outer_size();
         println!("rect: {:?}", rect);
-        let inner_rect = self.window.inner_size();
+        let inner_rect: winit::dpi::PhysicalSize<u32> = self.window.inner_size();
         println!("inner_rect: {:?}", inner_rect);
         let position = self.window.outer_position().unwrap();
         let rc_client = windows_sys::Win32::Foundation::RECT {
@@ -308,7 +354,7 @@ impl WindowWrapper {
                             println!("BitBlt failed");
                         }
 
-                        TextOutW(hdc, 100, 0, encode_wide("Hello, World").as_ptr(), 13);
+                        TextOutW(hdc, 100, 0, encode_wide("ハローワールド！！").as_ptr(), 10);
 
                         SelectObject(hdc_paint, hbm_old);
                         if h_font_old != 0 {
