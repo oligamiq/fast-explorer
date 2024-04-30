@@ -2,6 +2,7 @@ use std::{
     ffi::{c_void, OsStr, OsString},
     iter::once,
     os::windows::ffi::{OsStrExt as _, OsStringExt as _},
+    pin::{pin, Pin},
     ptr::{null, null_mut},
 };
 
@@ -42,20 +43,31 @@ use winit::{
     window::{Window, WindowButtons},
 };
 
-use crate::window::{
-    get_caption_button_rect, get_extended_frame_bounds, get_nc_rendering_policy,
-    set_allow_nc_paint, set_nc_rendering_policy, set_transitions_force_disabled,
-    set_window_corner_radius, wrapper_subclass_prop, UIDSUBCLASS,
+use crate::{
+    setting::{
+        window::{PinnedWindowSetting, WindowSetting},
+        SettingContext,
+    },
+    window::{
+        get_caption_button_rect, get_extended_frame_bounds, get_nc_rendering_policy,
+        set_allow_nc_paint, set_nc_rendering_policy, set_transitions_force_disabled,
+        set_window_corner_radius, wrapper_subclass_prop, UIDSUBCLASS,
+    },
 };
-
-use super::{BOTTOMEXTENDWIDTH, LEFTEXTENDWIDTH, RIGHTEXTENDWIDTH, TOPEXTENDWIDTH};
 
 pub struct WindowWrapper {
     pub window: Window,
+    pub setting: Pin<Box<PinnedWindowSetting>>,
 }
 
 impl WindowWrapper {
-    pub fn new(event_loop: &ActiveEventLoop) -> Self {
+    pub fn new(event_loop: &ActiveEventLoop, setting: SettingContext) -> Self {
+        let setting = {
+            let window_setting_reader = setting.read();
+            let setting = *window_setting_reader.window_setting();
+            setting
+        };
+
         let mut window = Window::default_attributes();
         window.title = "FastExplorer".into();
         // window = window.with_undecorated_shadow(true);
@@ -90,17 +102,24 @@ impl WindowWrapper {
             SetWindowLongPtrW(hwnd, GWL_STYLE, style as isize);
         }
 
+        let pinned_setting = Box::pin(PinnedWindowSetting::new(setting));
+
+        let ret = Self {
+            window,
+            setting: pinned_setting,
+        };
+
         unsafe {
             SetWindowSubclass(
                 hwnd.0,
                 Some(wrapper_subclass_prop),
                 UIDSUBCLASS,
-                &mut window as *mut Window as usize,
+                ret.setting.pointer() as *const PinnedWindowSetting as usize,
             )
         };
 
-        let position = window.outer_position().unwrap();
-        let rect = window.outer_size();
+        let position = ret.window.outer_position().unwrap();
+        let rect = ret.window.outer_size();
 
         println!("position: {:?}", position);
         println!("rect: {:?}", rect);
@@ -111,7 +130,7 @@ impl WindowWrapper {
             caption_rect.top, caption_rect.left, caption_rect.right, caption_rect.bottom
         );
 
-        let ret = unsafe {
+        unsafe {
             SetWindowPos(
                 hwnd,
                 HWND::default(),
@@ -123,7 +142,8 @@ impl WindowWrapper {
                 // 500,
                 SWP_FRAMECHANGED,
             )
-        };
+        }
+        .unwrap();
 
         let caption_rect = unsafe { get_caption_button_rect(hwnd.0) };
         println!(
@@ -131,13 +151,11 @@ impl WindowWrapper {
             caption_rect.top, caption_rect.left, caption_rect.right, caption_rect.bottom
         );
 
-        ret.unwrap();
-
         let margins = MARGINS {
-            cxLeftWidth: LEFTEXTENDWIDTH,
-            cxRightWidth: RIGHTEXTENDWIDTH,
-            cyBottomHeight: BOTTOMEXTENDWIDTH,
-            cyTopHeight: TOPEXTENDWIDTH,
+            cxLeftWidth: setting.left_frame_width,
+            cxRightWidth: setting.right_frame_width,
+            cyTopHeight: setting.top_frame_height,
+            cyBottomHeight: setting.bottom_frame_height,
         };
 
         let hr = unsafe { DwmExtendFrameIntoClientArea(hwnd.0, &margins) };
@@ -147,18 +165,18 @@ impl WindowWrapper {
             println!("DwmExtendFrameIntoClientArea succeeded");
         }
 
-        let mut caption_rect = unsafe { get_caption_button_rect(hwnd.0) };
-        let window_rect = unsafe { get_extended_frame_bounds(hwnd.0) };
-        println!(
-            "caption_rect 2: top: {}, left: {}, right: {}, bottom: {}",
-            caption_rect.top, caption_rect.left, caption_rect.right, caption_rect.bottom
-        );
-        let window_width = window_rect.right - window_rect.left;
-        let diff = window_width - caption_rect.right;
-        dbg!(diff);
-        caption_rect.left += diff;
-        caption_rect.right += diff;
-        caption_rect.bottom = caption_rect.top + TOPEXTENDWIDTH;
+        // let mut caption_rect = unsafe { get_caption_button_rect(hwnd.0) };
+        // let window_rect = unsafe { get_extended_frame_bounds(hwnd.0) };
+        // println!(
+        //     "caption_rect 2: top: {}, left: {}, right: {}, bottom: {}",
+        //     caption_rect.top, caption_rect.left, caption_rect.right, caption_rect.bottom
+        // );
+        // let window_width = window_rect.right - window_rect.left;
+        // let diff = window_width - caption_rect.right;
+        // dbg!(diff);
+        // caption_rect.left += diff;
+        // caption_rect.right += diff;
+        // caption_rect.bottom = caption_rect.top + setting.get_window_setting().top_frame_height;
 
         // 一応
         // unsafe {
@@ -176,7 +194,7 @@ impl WindowWrapper {
         // dbg!(DWMNCRP_USEWINDOWSTYLE);
         // unsafe { set_nc_rendering_policy(hwnd.0, DWMNCRP_ENABLED) };
 
-        unsafe { crate::window::set_caption_button_rect(hwnd.0, caption_rect) };
+        // unsafe { crate::window::set_caption_button_rect(hwnd.0, caption_rect) };
 
         // println!("window_rect: top: {}, left: {}, right: {}, bottom: {}", window_rect.top, window_rect.left, window_rect.right, window_rect.bottom);
         // println!("window_width: {}", window_width);
@@ -185,7 +203,7 @@ impl WindowWrapper {
         //     rewrite_title_bar(hwnd);
         // }
 
-        Self { window }
+        ret
     }
 
     // https://learn.microsoft.com/en-us/windows/win32/dwm/customframe
@@ -200,6 +218,8 @@ impl WindowWrapper {
 
     pub fn paint(&self) {
         use raqote::*;
+
+        // println!("paint start");
 
         let context = softbuffer::Context::new(&self.window).unwrap();
 
@@ -235,6 +255,8 @@ impl WindowWrapper {
         buffer.copy_from_slice(&dt.get_data_mut());
 
         buffer.present().unwrap();
+
+        // println!("paint end");
     }
 
     // #[inline]

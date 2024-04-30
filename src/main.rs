@@ -5,6 +5,8 @@ use global_hotkey::hotkey::{self, Code, HotKey, Modifiers};
 use global_hotkey::{
     GlobalHotKeyEvent, GlobalHotKeyEventReceiver, GlobalHotKeyManager, HotKeyState,
 };
+use parking_lot::RwLock;
+use setting::SettingContext;
 use windows::Win32::Graphics::Dwm::{self, DwmDefWindowProc};
 use windows_sys::Win32::Graphics::Gdi::{
     BeginPaint, CreateCompatibleDC, CreateDIBSection, SelectObject, BITMAPINFO, BITMAPINFOHEADER,
@@ -19,6 +21,8 @@ use winit::window::{Window, WindowId};
 mod window;
 use window::WindowWrapper;
 
+mod setting;
+
 #[derive(Default)]
 struct State {
     // Use an `Option` to allow the window to not be available until the
@@ -26,6 +30,7 @@ struct State {
     window: Vec<WindowWrapper>,
     counter: i32,
     hotkey_state: Option<HotkeyStruct>,
+    setting: SettingContext,
 }
 
 struct HotkeyStruct {
@@ -55,7 +60,8 @@ impl State {
 
             let hotkey = hotkey_state.hotkey.get(&HandledHotKeys::MetaShitE).unwrap();
             if hotkey.id() == event.id && event.state == HotKeyState::Pressed {
-                self.window.push(WindowWrapper::new(event_loop));
+                self.window
+                    .push(WindowWrapper::new(event_loop, self.setting.clone()));
             }
         }
     }
@@ -64,7 +70,8 @@ impl State {
 impl ApplicationHandler for State {
     // This is a common indicator that you can create a window.
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        self.window.push(WindowWrapper::new(event_loop));
+        self.window
+            .push(WindowWrapper::new(event_loop, self.setting.clone()));
 
         // println!("Application resumed");
     }
@@ -107,7 +114,7 @@ impl ApplicationHandler for State {
 
                 match &event {
                     WindowEvent::RedrawRequested => {
-                        println!("Redraw requested");
+                        // println!("Redraw requested");
                         //
                         window.paint();
                     }

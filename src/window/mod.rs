@@ -1,4 +1,6 @@
 mod window;
+use std::mem;
+
 use winapi::shared::windowsx::{GET_X_LPARAM, GET_Y_LPARAM};
 pub use window::WindowWrapper;
 use windows::Win32::UI::WindowsAndMessaging::HTCLOSE;
@@ -6,10 +8,16 @@ use windows_sys::{
     core::HRESULT,
     Win32::{
         Foundation::{FALSE, HWND, LPARAM, LRESULT, RECT, S_OK, WPARAM},
-        Graphics::Dwm::{
-            DwmDefWindowProc, DwmExtendFrameIntoClientArea, DwmGetWindowAttribute,
-            DwmSetWindowAttribute, DWMWA_CAPTION_BUTTON_BOUNDS, DWMWCP_DONOTROUND,
-            DWM_WINDOW_CORNER_PREFERENCE,
+        Graphics::{
+            Dwm::{
+                DwmDefWindowProc, DwmExtendFrameIntoClientArea, DwmGetWindowAttribute,
+                DwmSetWindowAttribute, DWMWA_CAPTION_BUTTON_BOUNDS, DWMWCP_DONOTROUND,
+                DWM_WINDOW_CORNER_PREFERENCE,
+            },
+            Gdi::{
+                GetMonitorInfoW, MonitorFromRect, HMONITOR, MONITORINFO, MONITORINFOEXW,
+                MONITOR_DEFAULTTONULL,
+            },
         },
         UI::{
             Controls::MARGINS,
@@ -22,6 +30,9 @@ use windows_sys::{
         },
     },
 };
+use winit::monitor;
+
+use crate::setting::window::{PinnedWindowSetting, WindowSetting};
 
 const UIDSUBCLASS: usize = 0x1599764cf41046de;
 
@@ -35,8 +46,7 @@ unsafe extern "system" fn wrapper_subclass_prop(
 ) -> LRESULT {
     debug_assert_eq!(uidsubclass, UIDSUBCLASS);
 
-    let window = dwrefdata as *mut WindowWrapper;
-    let window = &mut *window;
+    // println!("umsg: {}, wparam: {}, lparam: {}", umsg, wparam, lparam);
 
     let mut l_ret: LRESULT = 0;
 
@@ -73,7 +83,7 @@ unsafe extern "system" fn wrapper_subclass_prop(
         //     println!("DwmExtendFrameIntoClientArea succeeded");
         // }
 
-        dbg!(hwnd);
+        // dbg!(hwnd);
 
         // return 0;
     }
@@ -88,24 +98,12 @@ unsafe extern "system" fn wrapper_subclass_prop(
 
         // https://github.com/rust-windowing/winit/blob/337d50779c299240f6e0a67ef3e852f1c971cf16/src/platform_impl/windows/event_loop.rs#L1076
 
-        (*params).rgrc[0].top += 0;
-        (*params).rgrc[0].left += 0;
-        (*params).rgrc[0].right += 0;
-        (*params).rgrc[0].bottom += 0;
-        println!(
-            "rgrc[0]: top: {}, left: {}, right: {}, bottom: {}",
-            (*params).rgrc[0].top,
-            (*params).rgrc[0].left,
-            (*params).rgrc[0].right,
-            (*params).rgrc[0].bottom
-        );
-        println!(
-            "width: {}, height: {}",
-            (*params).rgrc[0].right - (*params).rgrc[0].left,
-            (*params).rgrc[0].bottom - (*params).rgrc[0].top
-        );
-
-        println!("WM_NCCALCSIZE: {}", lparam as isize);
+        if IsZoomed(hwnd) != 0 {
+            let monitor = unsafe { MonitorFromRect(&(*params).rgrc[0], MONITOR_DEFAULTTONULL) };
+            if let Ok(monitor_info) = get_monitor_info(monitor) {
+                (*params).rgrc[0] = monitor_info.monitorInfo.rcWork;
+            }
+        }
 
         return 0;
         // const WVR_REDRAW: isize = 0x0300;
@@ -114,7 +112,11 @@ unsafe extern "system" fn wrapper_subclass_prop(
 
     // タップ動作の上書き
     if umsg == WM_NCHITTEST && l_ret == HTNOWHERE as isize {
-        l_ret = hit_test_nca(hwnd, wparam, lparam);
+        let setting = dwrefdata as *const PinnedWindowSetting;
+        let setting = &*setting;
+        let setting = setting.setting();
+
+        l_ret = hit_test_nca(hwnd, wparam, lparam, setting);
 
         if l_ret == HTNOWHERE as isize {
             return DefSubclassProc(hwnd, umsg, wparam, lparam);
@@ -130,9 +132,26 @@ unsafe extern "system" fn wrapper_subclass_prop(
     }
 }
 
+// https://github.com/rust-windowing/winit/blob/master/src/platform_impl/windows/monitor.rs#L135
+pub(crate) fn get_monitor_info(hmonitor: HMONITOR) -> Result<MONITORINFOEXW, std::io::Error> {
+    let mut monitor_info: MONITORINFOEXW = unsafe { mem::zeroed() };
+    monitor_info.monitorInfo.cbSize = mem::size_of::<MONITORINFOEXW>() as u32;
+    let status = unsafe {
+        GetMonitorInfoW(
+            hmonitor,
+            &mut monitor_info as *mut MONITORINFOEXW as *mut MONITORINFO,
+        )
+    };
+    if status == false.into() {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(monitor_info)
+    }
+}
+
 // https://learn.microsoft.com/ja-jp/windows/win32/inputdev/wm-nchittest
 // Hit test the frame for resizing and moving.
-fn hit_test_nca(hwnd: HWND, w_param: WPARAM, l_param: LPARAM) -> LRESULT {
+fn hit_test_nca(hwnd: HWND, w_param: WPARAM, l_param: LPARAM, setting: &WindowSetting) -> LRESULT {
     // Get the point coordinates for the hit test.
     let pt_mouse = windows::Win32::Foundation::POINT {
         x: GET_X_LPARAM(l_param),
@@ -162,10 +181,14 @@ fn hit_test_nca(hwnd: HWND, w_param: WPARAM, l_param: LPARAM) -> LRESULT {
     let mut u_col: usize = 1;
     let mut f_on_resize_border = false;
 
-    let top_ext_width = 20;
-    let bottom_ext_width = 5;
-    let left_ext_width = 5;
-    let right_ext_width = 5;
+    let top_ext_width = setting.top_frame_height;
+    let bottom_ext_width = setting.bottom_frame_height;
+    let left_ext_width = setting.left_frame_width;
+    let right_ext_width = setting.right_frame_width;
+
+    // println!(
+    //     "top: {}, bottom: {}, left: {}, right: {}",
+    //     top_ext_width, bottom_ext_width, left_ext_width, right_ext_width);
 
     // Determine if the point is at the top or bottom of the window.
     // if (pt_mouse.y >= rc_window.top && pt_mouse.y < rc_window.top + TOPEXTENDWIDTH) {
@@ -196,21 +219,6 @@ fn hit_test_nca(hwnd: HWND, w_param: WPARAM, l_param: LPARAM) -> LRESULT {
 
     return hit_tests[u_row][u_col] as isize;
 }
-
-// これは余白
-// この範囲がダブルクリックで拡大や、ドラッグで移動できる範囲
-// const LEFTEXTENDWIDTH: i32 = 8;
-// const RIGHTEXTENDWIDTH: i32 = 8;
-// const BOTTOMEXTENDWIDTH: i32 = 20;
-// const TOPEXTENDWIDTH: i32 = 27;
-const LEFTEXTENDWIDTH: i32 = 0;
-const RIGHTEXTENDWIDTH: i32 = 0;
-const BOTTOMEXTENDWIDTH: i32 = 10;
-const TOPEXTENDWIDTH: i32 = 40;
-// pub const LEFTEXTENDWIDTH: i32 = 0;
-// pub const RIGHTEXTENDWIDTH: i32 = 0;
-// pub const BOTTOMEXTENDWIDTH: i32 = 0;
-// pub const TOPEXTENDWIDTH: i32 = 0;
 
 // https://learn.microsoft.com/ja-jp/windows/win32/api/dwmapi/ne-dwmapi-dwmwindowattribute
 
