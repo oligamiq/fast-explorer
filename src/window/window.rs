@@ -11,7 +11,7 @@ use windows::{
         Foundation::{HWND, TRUE},
         Graphics::Dwm::{DwmDefWindowProc, DwmIsCompositionEnabled},
         UI::WindowsAndMessaging::{
-            AdjustWindowRectEx, GetWindowLongPtrW, SetWindowPos, GWLP_HINSTANCE, SWP_FRAMECHANGED,
+            AdjustWindowRectEx, GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWLP_HINSTANCE, GWL_STYLE, SWP_FRAMECHANGED, WS_SYSMENU
         },
     },
     UI::WindowManagement::{AppWindow, AppWindowTitleBar},
@@ -75,6 +75,12 @@ impl WindowWrapper {
 
         let caption_rect = unsafe { get_caption_button_rect(hwnd.0) };
         println!("caption_rect -1: top: {}, left: {}, right: {}, bottom: {}", caption_rect.top, caption_rect.left, caption_rect.right, caption_rect.bottom);
+
+        unsafe {
+            let mut style = GetWindowLongPtrW(hwnd, GWL_STYLE) as u32;
+            style &= !WS_SYSMENU.0;
+            SetWindowLongPtrW(hwnd, GWL_STYLE, style as isize);
+        }
 
         unsafe {
             SetWindowSubclass(
