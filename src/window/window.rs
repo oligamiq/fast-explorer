@@ -55,7 +55,7 @@ impl WindowWrapper {
         window.title = "FastExplorer".into();
         // window = window.with_undecorated_shadow(true);
         // window = window.with_decorations(false);
-        window = window.with_enabled_buttons(WindowButtons::CLOSE);
+        // window = window.with_enabled_buttons(WindowButtons::CLOSE);
         // let window = window.with_active(false);
 
         let mut window = event_loop.create_window(window).unwrap();

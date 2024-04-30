@@ -170,8 +170,7 @@ fn hit_test_nca(hwnd: HWND, w_param: WPARAM, l_param: LPARAM) -> LRESULT {
             HTTOPRIGHT,
         ],
         vec![HTLEFT, HTNOWHERE, HTRIGHT],
-        // vec![HTBOTTOMLEFT, HTBOTTOM, HTBOTTOMRIGHT],
-        vec![HTBOTTOMLEFT, HTBOTTOM, HTGROWBOX],
+        vec![HTBOTTOMLEFT, HTBOTTOM, HTBOTTOMRIGHT],
     ];
 
     return hit_tests[u_row][u_col] as isize;
