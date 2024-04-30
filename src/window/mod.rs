@@ -1,6 +1,7 @@
 mod window;
 use winapi::shared::windowsx::{GET_X_LPARAM, GET_Y_LPARAM};
 pub use window::WindowWrapper;
+use windows::Win32::UI::WindowsAndMessaging::HTCLOSE;
 use windows_sys::{
     core::HRESULT,
     Win32::{
@@ -8,7 +9,7 @@ use windows_sys::{
         Graphics::Dwm::{DwmDefWindowProc, DwmExtendFrameIntoClientArea, DwmGetWindowAttribute, DwmSetWindowAttribute, DWMWA_CAPTION_BUTTON_BOUNDS, DWMWCP_DONOTROUND, DWM_WINDOW_CORNER_PREFERENCE},
         UI::{
             Controls::MARGINS, Shell::DefSubclassProc, WindowsAndMessaging::{
-                AdjustWindowRectEx, GetWindowRect, IsZoomed, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTLEFT, HTMAXBUTTON, HTNOWHERE, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, WM_NCCALCSIZE, WM_NCHITTEST, WM_PAINT, WS_CAPTION, WS_OVERLAPPEDWINDOW
+                AdjustWindowRectEx, GetWindowRect, IsZoomed, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTGROWBOX, HTLEFT, HTMAXBUTTON, HTNOWHERE, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, WM_NCCALCSIZE, WM_NCHITTEST, WM_PAINT, WS_CAPTION, WS_OVERLAPPEDWINDOW
             }
         },
     },
@@ -94,12 +95,10 @@ unsafe extern "system" fn wrapper_subclass_prop(
     }
 
     // タップ動作の上書き
-    if umsg == WM_NCHITTEST && l_ret == 0 {
-        if l_ret == HTNOWHERE as isize {
-            l_ret = hit_test_nca(hwnd, wparam, lparam);
+    if umsg == WM_NCHITTEST && l_ret == HTNOWHERE as isize {
+        l_ret = hit_test_nca(hwnd, wparam, lparam);
 
-            return l_ret;
-        }
+        return l_ret;
     }
 
     if f_call_dwp {
@@ -109,6 +108,7 @@ unsafe extern "system" fn wrapper_subclass_prop(
     }
 }
 
+// https://learn.microsoft.com/ja-jp/windows/win32/inputdev/wm-nchittest
 // Hit test the frame for resizing and moving.
 fn hit_test_nca(hwnd: HWND, w_param: WPARAM, l_param: LPARAM) -> LRESULT {
     // Get the point coordinates for the hit test.
@@ -170,7 +170,8 @@ fn hit_test_nca(hwnd: HWND, w_param: WPARAM, l_param: LPARAM) -> LRESULT {
             HTTOPRIGHT,
         ],
         vec![HTLEFT, HTNOWHERE, HTRIGHT],
-        vec![HTBOTTOMLEFT, HTBOTTOM, HTBOTTOMRIGHT],
+        // vec![HTBOTTOMLEFT, HTBOTTOM, HTBOTTOMRIGHT],
+        vec![HTBOTTOMLEFT, HTBOTTOM, HTGROWBOX],
     ];
 
     return hit_tests[u_row][u_col] as isize;

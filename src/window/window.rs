@@ -36,7 +36,7 @@ use windows_sys::Win32::{
 };
 use winit::{
     event_loop::ActiveEventLoop,
-    platform::windows::WindowExtWindows as _,
+    platform::windows::{WindowAttributesExtWindows as _, WindowExtWindows as _},
     raw_window_handle::HasWindowHandle as _,
     window::{Window, WindowButtons},
 };
@@ -53,6 +53,9 @@ impl WindowWrapper {
     pub fn new(event_loop: &ActiveEventLoop) -> Self {
         let mut window = Window::default_attributes();
         window.title = "FastExplorer".into();
+        // window = window.with_undecorated_shadow(true);
+        // window = window.with_decorations(false);
+        window = window.with_enabled_buttons(WindowButtons::CLOSE);
         // let window = window.with_active(false);
 
         let mut window = event_loop.create_window(window).unwrap();
