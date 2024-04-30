@@ -84,6 +84,7 @@ unsafe extern "system" fn wrapper_subclass_prop(
         (*params).rgrc[0].right += 0;
         (*params).rgrc[0].bottom += 0;
         println!("rgrc[0]: top: {}, left: {}, right: {}, bottom: {}", (*params).rgrc[0].top, (*params).rgrc[0].left, (*params).rgrc[0].right, (*params).rgrc[0].bottom);
+        println!("width: {}, height: {}", (*params).rgrc[0].right - (*params).rgrc[0].left, (*params).rgrc[0].bottom - (*params).rgrc[0].top);
 
         println!("WM_NCCALCSIZE: {}", lparam as isize);
 
@@ -182,8 +183,8 @@ fn hit_test_nca(hwnd: HWND, w_param: WPARAM, l_param: LPARAM) -> LRESULT {
 // const BOTTOMEXTENDWIDTH: i32 = 20;
 // const TOPEXTENDWIDTH: i32 = 27;
 const LEFTEXTENDWIDTH: i32 = 0;
-const RIGHTEXTENDWIDTH: i32 = 10;
-const BOTTOMEXTENDWIDTH: i32 = 0;
+const RIGHTEXTENDWIDTH: i32 = 0;
+const BOTTOMEXTENDWIDTH: i32 = 10;
 const TOPEXTENDWIDTH: i32 = 40;
 // pub const LEFTEXTENDWIDTH: i32 = 0;
 // pub const RIGHTEXTENDWIDTH: i32 = 0;
