@@ -1,5 +1,23 @@
 {
     "cSpell.words": [
-        "winit"
+        "BITMAPINFO",
+        "BITMAPINFOHEADER",
+        "BOTTOMEXTENDWIDTH",
+        "DTTOPTS",
+        "dwrefdata",
+        "hwnd",
+        "LEFTEXTENDWIDTH",
+        "LOGFONTW",
+        "lparam",
+        "LRESULT",
+        "PAINTSTRUCT",
+        "RGBQUAD",
+        "RIGHTEXTENDWIDTH",
+        "SRCCOPY",
+        "TOPEXTENDWIDTH",
+        "uidsubclass",
+        "umsg",
+        "winit",
+        "WPARAM"
     ]
 }

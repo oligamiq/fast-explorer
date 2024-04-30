@@ -1,0 +1,406 @@
+use std::{
+    ffi::{c_void, OsStr, OsString},
+    iter::once,
+    os::windows::ffi::{OsStrExt as _, OsStringExt as _},
+    ptr::{null, null_mut},
+};
+
+use windows::{
+    core::Interface,
+    Win32::{
+        Foundation::{HWND, TRUE},
+        Graphics::Dwm::{DwmDefWindowProc, DwmIsCompositionEnabled},
+        UI::WindowsAndMessaging::{
+            AdjustWindowRectEx, GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWLP_HINSTANCE, GWL_STYLE, SWP_FRAMECHANGED, WS_SYSMENU
+        },
+    },
+    UI::WindowManagement::{AppWindow, AppWindowTitleBar},
+};
+use windows_sys::Win32::{
+    Foundation::POINT,
+    Graphics::{
+        Dwm::{DwmExtendFrameIntoClientArea, DWMNCRP_ENABLED, DWMNCRP_USEWINDOWSTYLE},
+        Gdi::{
+            BeginPaint, BitBlt, CreateCompatibleDC, CreateDIBSection, CreateFontIndirectW,
+            DeleteObject, EndPaint, SelectObject, TextOutW, BITMAPINFO, BITMAPINFOHEADER, DT_LEFT,
+            DT_WORD_ELLIPSIS, LOGFONTW, PAINTSTRUCT, RGBQUAD, SRCCOPY,
+        },
+    },
+    UI::{
+        Controls::{
+            CloseThemeData, DrawThemeTextEx, GetThemeSysFont, OpenThemeData, OpenThemeDataEx,
+            DTTOPTS, DTT_COMPOSITED, DTT_GLOWSIZE, MARGINS, TMT_CAPTIONFONT,
+        },
+        Shell::SetWindowSubclass,
+    },
+};
+use winit::{
+    event_loop::ActiveEventLoop,
+    platform::windows::{WindowAttributesExtWindows as _, WindowExtWindows as _},
+    raw_window_handle::HasWindowHandle as _,
+    window::{Window, WindowButtons},
+};
+
+use crate::window::{get_caption_button_rect, get_extended_frame_bounds, get_nc_rendering_policy, set_allow_nc_paint, set_nc_rendering_policy, set_transitions_force_disabled, set_window_corner_radius, wrapper_subclass_prop, UIDSUBCLASS};
+
+use super::{BOTTOMEXTENDWIDTH, LEFTEXTENDWIDTH, RIGHTEXTENDWIDTH, TOPEXTENDWIDTH};
+
+pub struct WindowWrapper {
+    pub window: Window,
+}
+
+impl WindowWrapper {
+    pub fn new(event_loop: &ActiveEventLoop) -> Self {
+        let mut window = Window::default_attributes();
+        window.title = "FastExplorer".into();
+        // window = window.with_undecorated_shadow(true);
+        // window = window.with_decorations(false);
+        // window = window.with_enabled_buttons(WindowButtons::CLOSE);
+        // let window = window.with_active(false);
+
+        let mut window = event_loop.create_window(window).unwrap();
+
+        window.focus_window();
+
+        // let title = window.set_title("title");
+
+        let hwnd: u64 = window.id().into();
+        let hwnd: HWND = HWND(hwnd as isize);
+
+        let position = window.outer_position().unwrap();
+        let rect = window.outer_size();
+
+        println!("position: {:?}", position);
+        println!("rect: {:?}", rect);
+
+        let caption_rect = unsafe { get_caption_button_rect(hwnd.0) };
+        println!("caption_rect -1: top: {}, left: {}, right: {}, bottom: {}", caption_rect.top, caption_rect.left, caption_rect.right, caption_rect.bottom);
+
+        unsafe {
+            let mut style = GetWindowLongPtrW(hwnd, GWL_STYLE) as u32;
+            style &= !WS_SYSMENU.0;
+            SetWindowLongPtrW(hwnd, GWL_STYLE, style as isize);
+        }
+
+        unsafe {
+            SetWindowSubclass(
+                hwnd.0,
+                Some(wrapper_subclass_prop),
+                UIDSUBCLASS,
+                &mut window as *mut Window as usize,
+            )
+        };
+
+        let position = window.outer_position().unwrap();
+        let rect = window.outer_size();
+
+        println!("position: {:?}", position);
+        println!("rect: {:?}", rect);
+
+        let caption_rect = unsafe { get_caption_button_rect(hwnd.0) };
+        println!("caption_rect 0: top: {}, left: {}, right: {}, bottom: {}", caption_rect.top, caption_rect.left, caption_rect.right, caption_rect.bottom);
+
+        let ret = unsafe {
+            SetWindowPos(
+                hwnd,
+                HWND::default(),
+                position.x as i32,
+                position.y as i32,
+                rect.width as i32,
+                rect.height as i32,
+                // 500,
+                // 500,
+                SWP_FRAMECHANGED,
+            )
+        };
+
+        let caption_rect = unsafe { get_caption_button_rect(hwnd.0) };
+        println!("caption_rect 1: top: {}, left: {}, right: {}, bottom: {}", caption_rect.top, caption_rect.left, caption_rect.right, caption_rect.bottom);
+
+        ret.unwrap();
+
+        let margins = MARGINS {
+            cxLeftWidth: LEFTEXTENDWIDTH,
+            cxRightWidth: RIGHTEXTENDWIDTH,
+            cyBottomHeight: BOTTOMEXTENDWIDTH,
+            cyTopHeight: TOPEXTENDWIDTH,
+        };
+
+        let hr = unsafe { DwmExtendFrameIntoClientArea(hwnd.0, &margins) };
+        if hr != 0 {
+            println!("DwmExtendFrameIntoClientArea failed: {}", hr);
+        } else {
+            println!("DwmExtendFrameIntoClientArea succeeded");
+        }
+
+        let mut caption_rect = unsafe { get_caption_button_rect(hwnd.0) };
+        let window_rect = unsafe { get_extended_frame_bounds(hwnd.0) };
+        println!("caption_rect 2: top: {}, left: {}, right: {}, bottom: {}", caption_rect.top, caption_rect.left, caption_rect.right, caption_rect.bottom);
+        let window_width = window_rect.right - window_rect.left;
+        let diff = window_width - caption_rect.right;
+        dbg!(diff);
+        caption_rect.left += diff;
+        caption_rect.right += diff;
+        caption_rect.bottom = caption_rect.top + TOPEXTENDWIDTH;
+
+        // 一応
+        // unsafe {
+        //     set_allow_nc_paint(hwnd.0, true);
+        // }
+
+        unsafe { set_window_corner_radius(hwnd.0, windows_sys::Win32::Graphics::Dwm::DWMWCP_DONOTROUND) };
+
+        // unsafe { set_transitions_force_disabled(hwnd.0, true) };
+
+        // let policy = unsafe { get_nc_rendering_policy(hwnd.0) };
+        // println!("policy: {:?}", policy);
+        // dbg!(DWMNCRP_USEWINDOWSTYLE);
+        // unsafe { set_nc_rendering_policy(hwnd.0, DWMNCRP_ENABLED) };
+
+        unsafe { crate::window::set_caption_button_rect(hwnd.0, caption_rect) };
+
+        // println!("window_rect: top: {}, left: {}, right: {}, bottom: {}", window_rect.top, window_rect.left, window_rect.right, window_rect.bottom);
+        // println!("window_width: {}", window_width);
+
+        // unsafe {
+        //     rewrite_title_bar(hwnd);
+        // }
+
+        Self { window }
+    }
+
+    // https://learn.microsoft.com/en-us/windows/win32/dwm/customframe
+    #[inline]
+    pub fn check_dwm_is_composition(&self) -> bool {
+        let hr = unsafe { DwmIsCompositionEnabled() };
+        match hr {
+            Ok(TRUE) => return true,
+            _ => return false,
+        }
+    }
+
+    #[inline]
+    pub fn paint(
+        &self,
+        paint_func: impl Fn(
+            HWND,
+            windows_sys::Win32::Graphics::Gdi::HDC,
+            windows_sys::Win32::Foundation::RECT,
+        ),
+    ) {
+        let hwnd: u64 = self.window.id().into();
+        let hwnd: windows::Win32::Foundation::HWND =
+            windows::Win32::Foundation::HWND(hwnd as isize);
+
+        let mut caption_rect = unsafe { get_caption_button_rect(hwnd.0) };
+        let window_rect = unsafe { get_extended_frame_bounds(hwnd.0) };
+        println!("caption_rect: top: {}, left: {}, right: {}, bottom: {}", caption_rect.top, caption_rect.left, caption_rect.right, caption_rect.bottom);
+        let window_width = window_rect.right - window_rect.left;
+        let diff = window_width - caption_rect.right;
+        dbg!(diff);
+        caption_rect.left += diff;
+        caption_rect.right += diff;
+        caption_rect.bottom = caption_rect.top + TOPEXTENDWIDTH;
+        unsafe { crate::window::set_caption_button_rect(hwnd.0, caption_rect) };
+
+        let rect = self.window.outer_size();
+        println!("rect: {:?}", rect);
+        let inner_rect: winit::dpi::PhysicalSize<u32> = self.window.inner_size();
+        println!("inner_rect: {:?}", inner_rect);
+        let position = self.window.outer_position().unwrap();
+        let rc_client = windows_sys::Win32::Foundation::RECT {
+            left: position.x as i32,
+            top: position.y as i32,
+            right: position.x as i32 + rect.width as i32,
+            bottom: position.y as i32 + rect.height as i32,
+        };
+        dbg!(hwnd);
+
+        println!("rect: {:?}", rect);
+
+        unsafe {
+            // https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-paintstruct
+            let mut ps = PAINTSTRUCT {
+                hdc: Default::default(),
+                fErase: 0,
+                rcPaint: rc_client,
+                fRestore: Default::default(),
+                fIncUpdate: Default::default(),
+                rgbReserved: Default::default(),
+            };
+            let hdc = BeginPaint(hwnd.0, &mut ps);
+            let h_theme = OpenThemeData(0, encode_wide("CompositedWindow::Window").as_ptr());
+            if h_theme == 0 {
+                // Draw standard window frame.
+                println!("Draw standard window frame");
+            } else {
+                // Draw themed window frame.
+                println!("Draw themed window frame");
+                let hdc_paint = CreateCompatibleDC(hdc);
+                if hdc_paint != 0 {
+                    println!("CreateCompatibleDC succeeded");
+                    let width = rc_client.right - rc_client.left;
+                    let height = rc_client.bottom - rc_client.top;
+
+                    // Define the BITMAPINFO structure used to draw text.
+                    // Note that biHeight is negative. This is done because
+                    // DrawThemeTextEx() needs the bitmap to be in top-to-bottom
+                    // order.
+                    const BIT_COUNT: u16 = 32;
+                    let dib = BITMAPINFO {
+                        bmiHeader: BITMAPINFOHEADER {
+                            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                            biWidth: width,
+                            biHeight: -height,
+                            biPlanes: 1,
+                            biBitCount: BIT_COUNT,
+                            biCompression: 0,
+                            biSizeImage: 0,
+                            biXPelsPerMeter: 0,
+                            biYPelsPerMeter: 0,
+                            biClrUsed: 0,
+                            biClrImportant: 0,
+                        },
+                        bmiColors: [RGBQUAD {
+                            rgbBlue: 100,
+                            rgbGreen: 0,
+                            rgbRed: 0,
+                            rgbReserved: 0,
+                        }; 1],
+                    };
+
+                    const DIB_RGB_COLORS: u32 = 0;
+                    let hbm = CreateDIBSection(hdc, &dib, DIB_RGB_COLORS, null_mut(), 0, 0);
+                    if hbm != 0 {
+                        println!("CreateDIBSection succeeded");
+
+                        let hbm_old = SelectObject(hdc_paint, hbm);
+
+                        let dtt_opts = DTTOPTS {
+                            dwSize: std::mem::size_of::<DTTOPTS>() as u32,
+                            dwFlags: DTT_COMPOSITED | DTT_GLOWSIZE,
+                            iGlowSize: 15,
+                            crText: 20000,
+                            crBorder: 10000,
+                            crShadow: 1000,
+                            iTextShadowType: 0,
+                            ptShadowOffset: POINT { x: 0, y: 0 },
+                            iBorderSize: 0,
+                            iFontPropId: 0,
+                            iColorPropId: 0,
+                            iStateId: 0,
+                            fApplyOverlay: 0,
+                            pfnDrawTextCallback: None,
+                            lParam: 0,
+                        };
+
+                        let mut lg_font = LOGFONTW {
+                            lfHeight: 0,
+                            lfWidth: 0,
+                            lfEscapement: 0,
+                            lfOrientation: 0,
+                            lfWeight: 0,
+                            lfItalic: 0,
+                            lfUnderline: 0,
+                            lfStrikeOut: 0,
+                            lfCharSet: 0,
+                            lfOutPrecision: 0,
+                            lfClipPrecision: 0,
+                            lfQuality: 0,
+                            lfPitchAndFamily: 0,
+                            lfFaceName: [0; 32],
+                        };
+                        let mut h_font_old = 0;
+                        if GetThemeSysFont(h_theme, TMT_CAPTIONFONT as i32, &mut lg_font) != 0 {
+                            println!("GetThemeSysFont failed");
+                        } else {
+                            println!("CreateFontIndirectW succeeded");
+                            println!("lfFaceName: {:?}", decode_wide(&lg_font.lfFaceName));
+                            let h_font = CreateFontIndirectW(&lg_font);
+                            h_font_old = SelectObject(hdc_paint, h_font);
+                        }
+
+                        let mut rc_paint = rc_client;
+                        // rc_paint.top += 8;
+                        // rc_paint.left += 8;
+                        // rc_paint.right -= 125;
+                        // rc_paint.bottom = 50;
+                        if DrawThemeTextEx(
+                            h_theme,
+                            hdc_paint,
+                            0,
+                            0,
+                            encode_wide("Title !!").as_ptr(),
+                            -1,
+                            // DT_LEFT | DT_WORD_ELLIPSIS,
+                            DT_LEFT,
+                            &mut rc_paint,
+                            &dtt_opts,
+                        ) != 0
+                        {
+                            println!("DrawThemeTextEx failed");
+                        } else {
+                            println!("DrawThemeTextEx succeeded");
+                        }
+
+                        // if DrawThemeTextEx(
+                        //     h_theme,
+                        //     hdc,
+                        //     0,
+                        //     20,
+                        //     encode_wide("Hello, World").as_ptr(),
+                        //     -1,
+                        //     DT_LEFT | DT_WORD_ELLIPSIS,
+                        //     &mut rc_paint,
+                        //     &dtt_opts,
+                        // ) != 0
+                        // {
+                        //     println!("DrawThemeTextEx failed");
+                        // }
+
+                        TextOutW(hdc_paint, 0, 0, encode_wide("Hello, World").as_ptr(), 13);
+                        if BitBlt(hdc, 0, 0, width, height, hdc_paint, 0, 0, SRCCOPY) == 0 {
+                            println!("BitBlt failed");
+                        }
+
+                        TextOutW(hdc, 100, 0, encode_wide("ハローワールド！！").as_ptr(), 10);
+
+                        SelectObject(hdc_paint, hbm_old);
+                        if h_font_old != 0 {
+                            SelectObject(hdc_paint, h_font_old);
+                        }
+                        DeleteObject(hbm);
+
+                        println!("DrawThemeTextEx succeeded")
+                    } else {
+                        println!("CreateDIBSection failed");
+                    }
+                    DeleteObject(hdc_paint);
+                }
+                CloseThemeData(h_theme);
+            }
+            // paint_func(hwnd, hdc, rect);
+            EndPaint(hwnd.0, &ps);
+        }
+    }
+}
+
+// Win32_UI_WindowsAndMessaging
+// GetWindowLongPtrW
+
+// UI_WindowManagement_Preview
+// AppWindowTitleBar
+
+// Win32_Foundation
+
+pub fn encode_wide(string: impl AsRef<OsStr>) -> Vec<u16> {
+    string.as_ref().encode_wide().chain(once(0)).collect()
+}
+
+pub fn decode_wide(mut wide_c_string: &[u16]) -> OsString {
+    if let Some(null_pos) = wide_c_string.iter().position(|c| *c == 0) {
+        wide_c_string = &wide_c_string[..null_pos];
+    }
+
+    OsString::from_wide(wide_c_string)
+}
