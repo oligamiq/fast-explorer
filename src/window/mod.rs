@@ -6,11 +6,19 @@ use windows_sys::{
     core::HRESULT,
     Win32::{
         Foundation::{FALSE, HWND, LPARAM, LRESULT, RECT, S_OK, WPARAM},
-        Graphics::Dwm::{DwmDefWindowProc, DwmExtendFrameIntoClientArea, DwmGetWindowAttribute, DwmSetWindowAttribute, DWMWA_CAPTION_BUTTON_BOUNDS, DWMWCP_DONOTROUND, DWM_WINDOW_CORNER_PREFERENCE},
+        Graphics::Dwm::{
+            DwmDefWindowProc, DwmExtendFrameIntoClientArea, DwmGetWindowAttribute,
+            DwmSetWindowAttribute, DWMWA_CAPTION_BUTTON_BOUNDS, DWMWCP_DONOTROUND,
+            DWM_WINDOW_CORNER_PREFERENCE,
+        },
         UI::{
-            Controls::MARGINS, Shell::DefSubclassProc, WindowsAndMessaging::{
-                AdjustWindowRectEx, GetWindowRect, IsZoomed, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTGROWBOX, HTLEFT, HTMAXBUTTON, HTNOWHERE, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, WM_NCCALCSIZE, WM_NCHITTEST, WM_PAINT, WS_CAPTION, WS_OVERLAPPEDWINDOW
-            }
+            Controls::MARGINS,
+            Shell::DefSubclassProc,
+            WindowsAndMessaging::{
+                AdjustWindowRectEx, GetWindowRect, IsZoomed, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT,
+                HTCAPTION, HTGROWBOX, HTLEFT, HTMAXBUTTON, HTNOWHERE, HTRIGHT, HTTOP, HTTOPLEFT,
+                HTTOPRIGHT, WM_NCCALCSIZE, WM_NCHITTEST, WM_PAINT, WS_CAPTION, WS_OVERLAPPEDWINDOW,
+            },
         },
     },
 };
@@ -84,8 +92,18 @@ unsafe extern "system" fn wrapper_subclass_prop(
         (*params).rgrc[0].left += 0;
         (*params).rgrc[0].right += 0;
         (*params).rgrc[0].bottom += 0;
-        println!("rgrc[0]: top: {}, left: {}, right: {}, bottom: {}", (*params).rgrc[0].top, (*params).rgrc[0].left, (*params).rgrc[0].right, (*params).rgrc[0].bottom);
-        println!("width: {}, height: {}", (*params).rgrc[0].right - (*params).rgrc[0].left, (*params).rgrc[0].bottom - (*params).rgrc[0].top);
+        println!(
+            "rgrc[0]: top: {}, left: {}, right: {}, bottom: {}",
+            (*params).rgrc[0].top,
+            (*params).rgrc[0].left,
+            (*params).rgrc[0].right,
+            (*params).rgrc[0].bottom
+        );
+        println!(
+            "width: {}, height: {}",
+            (*params).rgrc[0].right - (*params).rgrc[0].left,
+            (*params).rgrc[0].bottom - (*params).rgrc[0].top
+        );
 
         println!("WM_NCCALCSIZE: {}", lparam as isize);
 
@@ -151,11 +169,10 @@ fn hit_test_nca(hwnd: HWND, w_param: WPARAM, l_param: LPARAM) -> LRESULT {
 
     // Determine if the point is at the top or bottom of the window.
     // if (pt_mouse.y >= rc_window.top && pt_mouse.y < rc_window.top + TOPEXTENDWIDTH) {
-        if (pt_mouse.y >= rc_window.top && pt_mouse.y < rc_window.top + top_ext_width) {
+    if (pt_mouse.y >= rc_window.top && pt_mouse.y < rc_window.top + top_ext_width) {
         f_on_resize_border = (pt_mouse.y < (rc_window.top - rc_frame.top));
         u_row = 0;
-    } else if (pt_mouse.y < rc_window.bottom && pt_mouse.y >= rc_window.bottom - bottom_ext_width)
-    {
+    } else if (pt_mouse.y < rc_window.bottom && pt_mouse.y >= rc_window.bottom - bottom_ext_width) {
         u_row = 2;
     }
 
@@ -257,7 +274,10 @@ pub unsafe fn get_extended_frame_bounds(hwnd: HWND) -> RECT {
     if hr != 0 {
         println!("DwmGetWindowAttribute failed: {}", hr);
     } else {
-        println!("DwmGetWindowAttribute succeeded:\ntop: {}\nleft: {}\nright: {}\nbottom: {}", bounds.top, bounds.left, bounds.right, bounds.bottom);
+        println!(
+            "DwmGetWindowAttribute succeeded:\ntop: {}\nleft: {}\nright: {}\nbottom: {}",
+            bounds.top, bounds.left, bounds.right, bounds.bottom
+        );
     }
 
     bounds

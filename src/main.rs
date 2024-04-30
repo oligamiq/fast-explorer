@@ -90,41 +90,42 @@ impl ApplicationHandler for State {
         //     _ => {}
         // }
 
-        let window_index = &self
-            .window
-            .iter()
-            .position(|w| w.window.id() == window_id)
-            .unwrap();
-        let window = &self.window[*window_index];
-        match event {
-            WindowEvent::Destroyed => {
-                println!("Window destroyed");
-                self.window.remove(*window_index);
-                return;
-            }
-            WindowEvent::Focused(focus) => {
-                println!("Window focused: {focus}");
-            }
-            _ => {}
-        }
-        if window.check_dwm_is_composition() {
-            // println!("DWM is enabled");
-
-            match &event {
-                WindowEvent::RedrawRequested => {
-                    println!("Redraw requested");
-                    //
-                    window.paint(|hwnd, hdc, rect| unsafe {});
+        if let Some(window_index) = &self.window.iter().position(|w| w.window.id() == window_id) {
+            let window = &self.window[*window_index];
+            match event {
+                WindowEvent::Destroyed => {
+                    println!("Window destroyed");
+                    return;
+                }
+                WindowEvent::Focused(focus) => {
+                    println!("Window focused: {focus}");
                 }
                 _ => {}
             }
+            if window.check_dwm_is_composition() {
+                // println!("DWM is enabled");
 
-            // let mut f_call_dwp = true;
-            // f_call_dwp = !unsafe { DwmDefWindowProc(hwnd, 0, ).into() } ;
+                match &event {
+                    WindowEvent::RedrawRequested => {
+                        println!("Redraw requested");
+                        //
+                        window.paint();
+                    }
+                    WindowEvent::CloseRequested => {
+                        println!("Close requested");
 
-            // match event {
-            //     WindowEvent::Destroyed
-            // }
+                        self.window.remove(*window_index);
+                    }
+                    _ => {}
+                }
+
+                // let mut f_call_dwp = true;
+                // f_call_dwp = !unsafe { DwmDefWindowProc(hwnd, 0, ).into() } ;
+
+                // match event {
+                //     WindowEvent::Destroyed
+                // }
+            }
         }
     }
 
