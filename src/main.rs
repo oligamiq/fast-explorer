@@ -102,6 +102,9 @@ impl ApplicationHandler for State {
                 self.window.remove(*window_index);
                 return;
             }
+            WindowEvent::Focused(focus) => {
+                println!("Window focused: {focus}");
+            }
             _ => {}
         }
         if window.check_dwm_is_composition() {

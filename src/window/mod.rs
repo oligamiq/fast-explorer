@@ -98,6 +98,10 @@ unsafe extern "system" fn wrapper_subclass_prop(
     if umsg == WM_NCHITTEST && l_ret == HTNOWHERE as isize {
         l_ret = hit_test_nca(hwnd, wparam, lparam);
 
+        if l_ret == HTNOWHERE as isize {
+            return DefSubclassProc(hwnd, umsg, wparam, lparam);
+        }
+
         return l_ret;
     }
 
