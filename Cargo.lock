@@ -581,7 +581,9 @@ dependencies = [
  "image",
  "parking_lot",
  "tray-icon",
+ "winapi",
  "windows",
+ "windows-sys 0.52.0",
  "winit",
 ]
 

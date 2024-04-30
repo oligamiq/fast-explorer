@@ -1,9 +1,16 @@
 use std::collections::HashMap;
+use std::ptr::null_mut;
 
 use global_hotkey::hotkey::{self, Code, HotKey, Modifiers};
 use global_hotkey::{
     GlobalHotKeyEvent, GlobalHotKeyEventReceiver, GlobalHotKeyManager, HotKeyState,
 };
+use windows::Win32::Graphics::Dwm::{self, DwmDefWindowProc};
+use windows_sys::Win32::Graphics::Gdi::{
+    BeginPaint, CreateCompatibleDC, CreateDIBSection, SelectObject, BITMAPINFO, BITMAPINFOHEADER,
+    PAINTSTRUCT, RGBQUAD,
+};
+use windows_sys::Win32::UI::Controls::OpenThemeData;
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, DeviceId, Event, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
@@ -48,8 +55,6 @@ impl State {
 
             let hotkey = hotkey_state.hotkey.get(&HandledHotKeys::MetaShitE).unwrap();
             if hotkey.id() == event.id && event.state == HotKeyState::Pressed {
-
-
                 self.window.push(WindowWrapper::new(event_loop));
             }
         }
@@ -74,6 +79,48 @@ impl ApplicationHandler for State {
         // receiving a window event.
         // let window = self.window.as_ref().unwrap();
         // Handle window event.
+
+        // match &event {
+        //     WindowEvent::Destroyed => {
+        //         self.window.remove();
+        //         return;
+        //     }
+        //     _ => {}
+        // }
+
+        let window_index = &self
+            .window
+            .iter()
+            .position(|w| w.window.id() == window_id)
+            .unwrap();
+        let window = &self.window[*window_index];
+        match event {
+            WindowEvent::Destroyed => {
+                println!("Window destroyed");
+                self.window.remove(*window_index);
+                return;
+            }
+            _ => {}
+        }
+        if window.check_dwm_is_composition() {
+            // println!("DWM is enabled");
+
+            match &event {
+                WindowEvent::RedrawRequested => {
+                    println!("Redraw requested");
+                    //
+                    window.paint(|hwnd, hdc, rect| unsafe {});
+                }
+                _ => {}
+            }
+
+            // let mut f_call_dwp = true;
+            // f_call_dwp = !unsafe { DwmDefWindowProc(hwnd, 0, ).into() } ;
+
+            // match event {
+            //     WindowEvent::Destroyed
+            // }
+        }
     }
 
     fn device_event(
@@ -103,7 +150,7 @@ impl ApplicationHandler for State {
 }
 
 fn main() {
-    let hotkeys_manager = GlobalHotKeyManager::new().unwrap();
+    let hotkeys_manager: GlobalHotKeyManager = GlobalHotKeyManager::new().unwrap();
 
     let hotkey = HotKey::new(Some(Modifiers::SHIFT), Code::KeyD);
     let hotkey2 = HotKey::new(Some(Modifiers::SHIFT | Modifiers::ALT), Code::KeyD);
