@@ -10,6 +10,11 @@ pub struct WindowSetting {
     pub right_frame_width: i32,
     pub top_frame_height: i32,
     pub bottom_frame_height: i32,
+    pub system_inner_frame_left: i32,
+    pub system_inner_frame_right: i32,
+    pub system_inner_frame_top: i32,
+    pub system_inner_frame_bottom: i32,
+    pub overlay_caption_frame_width: i32,
     pub control_box_setting: ControlBoxSetting,
 }
 
@@ -20,6 +25,11 @@ impl Default for WindowSetting {
             right_frame_width: 8,
             top_frame_height: 8,
             bottom_frame_height: 8,
+            system_inner_frame_left: 2,
+            system_inner_frame_right: 2,
+            system_inner_frame_top: 2,
+            system_inner_frame_bottom: 2,
+            overlay_caption_frame_width: 2,
             control_box_setting: ControlBoxSetting::default(),
         }
     }

@@ -1,5 +1,5 @@
 mod window;
-use std::mem;
+use std::{mem, rc};
 
 use winapi::shared::windowsx::{GET_X_LPARAM, GET_Y_LPARAM};
 pub use window::WindowWrapper;
@@ -221,6 +221,8 @@ unsafe extern "system" fn wrapper_subclass_prop(
 
     // タップ動作の上書き
     if umsg == WM_NCHITTEST && l_ret == HTNOWHERE as isize {
+        // println!("tap");
+
         let setting = dwrefdata as *const PinnedWindowSetting;
         let setting = &*setting;
         let setting = setting.setting();
@@ -278,7 +280,8 @@ fn hit_test_nca(hwnd: HWND, _w_param: WPARAM, l_param: LPARAM, setting: &WindowS
     };
     unsafe { GetWindowRect(hwnd, &mut rc_window) };
 
-    if unsafe { IsZoomed(hwnd) } != 0 {
+    let is_zoomed = unsafe { IsZoomed(hwnd) } != 0;
+    if is_zoomed {
         let monitor = unsafe {
             MonitorFromRect(
                 &RECT {
@@ -299,6 +302,8 @@ fn hit_test_nca(hwnd: HWND, _w_param: WPARAM, l_param: LPARAM, setting: &WindowS
     {
         let control_box_setting = setting.control_box_setting;
 
+        let overlay_caption_frame_width = setting.overlay_caption_frame_width;
+
         let size_width = rc_window.right - rc_window.left;
         let size_height = rc_window.bottom - rc_window.top;
 
@@ -313,9 +318,15 @@ fn hit_test_nca(hwnd: HWND, _w_param: WPARAM, l_param: LPARAM, setting: &WindowS
                     _ => 0,
                 };
 
-                let start_x = match control_box_setting.caption_direction {
-                    CaptionDirection::Left => 0,
-                    CaptionDirection::Right => size_width - control_box_setting.caption_wide,
+                let (start_x, outer_x) = match control_box_setting.caption_direction {
+                    CaptionDirection::Left => (
+                        overlay_caption_frame_width,
+                        rc_window.left + control_box_setting.box_width,
+                    ),
+                    CaptionDirection::Right => (
+                        size_width - control_box_setting.caption_wide,
+                        rc_window.left + size_width - control_box_setting.box_width,
+                    ),
                     _ => unreachable!(),
                 };
                 let start_y = match control_box_setting.position_y {
@@ -324,38 +335,49 @@ fn hit_test_nca(hwnd: HWND, _w_param: WPARAM, l_param: LPARAM, setting: &WindowS
                         size_height - count * control_box_setting.box_height
                     }
                     ControlBoxPositionAxis::Center { margin } => {
-                        (size_height - count * control_box_setting.box_height - (count - 1) * margin) / 2
+                        (size_height
+                            - count * control_box_setting.box_height
+                            - (count - 1) * margin)
+                            / 2
                     }
                 };
+                let first_overlay_frame_y = rc_window.top + overlay_caption_frame_width;
+                let last_overlay_frame_y = rc_window.bottom - overlay_caption_frame_width;
 
                 let mut y = start_y + rc_window.top;
                 let start_x = start_x + rc_window.left;
 
                 if control_box_setting.minimize_button {
-                    if pt_mouse.x >= start_x
-                        && pt_mouse.x < start_x + control_box_setting.box_width
-                        && pt_mouse.y >= y
+                    if start_x <= pt_mouse.x
+                        && pt_mouse.x < outer_x
+                        && y <= pt_mouse.y
                         && pt_mouse.y < y + control_box_setting.box_height
+                        && first_overlay_frame_y <= pt_mouse.y
+                        && pt_mouse.y < last_overlay_frame_y
                     {
                         return HTMINBUTTON as isize;
                     }
                     y += control_box_setting.box_height + movement;
                 }
                 if control_box_setting.maximize_button {
-                    if pt_mouse.x >= start_x
-                        && pt_mouse.x < start_x + control_box_setting.box_width
-                        && pt_mouse.y >= y
-                        && pt_mouse.y < y + control_box_setting.box_height
+                    if start_x <= pt_mouse.x
+                        && pt_mouse.x < outer_x
+                        && pt_mouse.y - control_box_setting.box_height < y
+                        && y <= pt_mouse.y
+                        && first_overlay_frame_y <= pt_mouse.y
+                        && pt_mouse.y < last_overlay_frame_y
                     {
                         return HTMAXBUTTON as isize;
                     }
-                    y += (control_box_setting.box_height + movement);
+                    y += control_box_setting.box_height + movement;
                 }
                 if control_box_setting.close_button {
-                    if pt_mouse.x >= start_x
-                        && pt_mouse.x < start_x + control_box_setting.box_width
-                        && pt_mouse.y >= y
-                        && pt_mouse.y < y + control_box_setting.box_height
+                    if start_x <= pt_mouse.x
+                        && pt_mouse.x < outer_x
+                        && pt_mouse.y - control_box_setting.box_height < y
+                        && y <= pt_mouse.y
+                        && first_overlay_frame_y <= pt_mouse.y
+                        && pt_mouse.y < last_overlay_frame_y
                     {
                         return HTCLOSE as isize;
                     }
@@ -373,14 +395,24 @@ fn hit_test_nca(hwnd: HWND, _w_param: WPARAM, l_param: LPARAM, setting: &WindowS
                         size_width - count * control_box_setting.box_width
                     }
                     ControlBoxPositionAxis::Center { margin } => {
-                        (size_width - count * control_box_setting.box_width - (count - 1) * margin) / 2
+                        (size_width - count * control_box_setting.box_width - (count - 1) * margin)
+                            / 2
                     }
                 };
-                let start_y = match control_box_setting.caption_direction {
-                    CaptionDirection::Top => 0,
-                    CaptionDirection::Bottom => size_height - control_box_setting.caption_wide,
+                let (start_y, outer_y) = match control_box_setting.caption_direction {
+                    CaptionDirection::Top => (
+                        overlay_caption_frame_width,
+                        rc_window.top + control_box_setting.box_height,
+                    ),
+                    CaptionDirection::Bottom => (
+                        size_height - control_box_setting.caption_wide,
+                        rc_window.top + size_height - control_box_setting.box_height,
+                    ),
                     _ => unreachable!(),
                 };
+
+                let first_overlay_frame_x = rc_window.left + overlay_caption_frame_width;
+                let last_overlay_frame_x = rc_window.right - overlay_caption_frame_width;
 
                 let mut x = start_x + rc_window.left;
                 let start_y = start_y + rc_window.top;
@@ -390,6 +422,8 @@ fn hit_test_nca(hwnd: HWND, _w_param: WPARAM, l_param: LPARAM, setting: &WindowS
                         && pt_mouse.x < x + control_box_setting.box_width
                         && pt_mouse.y >= start_y
                         && pt_mouse.y < start_y + control_box_setting.box_height
+                        && first_overlay_frame_x <= pt_mouse.x
+                        && pt_mouse.x < last_overlay_frame_x
                     {
                         // println!("minimize_button");
                         return HTMINBUTTON as isize;
@@ -401,17 +435,21 @@ fn hit_test_nca(hwnd: HWND, _w_param: WPARAM, l_param: LPARAM, setting: &WindowS
                         && pt_mouse.x < x + control_box_setting.box_width
                         && pt_mouse.y >= start_y
                         && pt_mouse.y < start_y + control_box_setting.box_height
+                        && first_overlay_frame_x <= pt_mouse.x
+                        && pt_mouse.x < last_overlay_frame_x
                     {
                         // println!("maximize_button");
                         return HTMAXBUTTON as isize;
                     }
-                    x += (control_box_setting.box_width + movement);
+                    x += control_box_setting.box_width + movement;
                 }
                 if control_box_setting.close_button {
                     if pt_mouse.x >= x
                         && pt_mouse.x < x + control_box_setting.box_width
                         && pt_mouse.y >= start_y
                         && pt_mouse.y < start_y + control_box_setting.box_height
+                        && first_overlay_frame_x <= pt_mouse.x
+                        && pt_mouse.x < last_overlay_frame_x
                     {
                         // println!("close_button");
                         return HTCLOSE as isize;
@@ -434,16 +472,16 @@ fn hit_test_nca(hwnd: HWND, _w_param: WPARAM, l_param: LPARAM, setting: &WindowS
     let caption_direction = control_box_setting.caption_direction;
 
     // Determine if the point is at the top or bottom of the window.
-    if (rc_window.top <= pt_mouse.y && pt_mouse.y < rc_window.top + top_ext_width) {
+    if rc_window.top <= pt_mouse.y && pt_mouse.y < rc_window.top + top_ext_width {
         u_row = 0;
-    } else if (pt_mouse.y < rc_window.bottom && pt_mouse.y >= rc_window.bottom - bottom_ext_width) {
+    } else if rc_window.bottom - bottom_ext_width <= pt_mouse.y && pt_mouse.y < rc_window.bottom {
         u_row = 2;
     }
 
     // Determine if the point is at the left or right of the window.
-    if (pt_mouse.x >= rc_window.left && pt_mouse.x < rc_window.left + left_ext_width) {
+    if rc_window.left <= pt_mouse.x && pt_mouse.x < rc_window.left + left_ext_width {
         u_col = 0; // left side
-    } else if (pt_mouse.x < rc_window.right && pt_mouse.x >= rc_window.right - right_ext_width) {
+    } else if rc_window.right - right_ext_width <= pt_mouse.x && pt_mouse.x < rc_window.right {
         u_col = 2; // right side
     }
 

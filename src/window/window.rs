@@ -160,10 +160,10 @@ impl WindowWrapper {
         // );
 
         let mut margins = MARGINS {
-            cxLeftWidth: 1,
-            cxRightWidth: 1,
-            cyTopHeight: 1,
-            cyBottomHeight: 1,
+            cxLeftWidth: setting.system_inner_frame_left,
+            cxRightWidth: setting.system_inner_frame_right,
+            cyTopHeight: setting.system_inner_frame_top,
+            cyBottomHeight: setting.system_inner_frame_bottom,
         };
         let control_box_setting = setting.control_box_setting;
         match control_box_setting.caption_direction {
@@ -318,7 +318,10 @@ impl WindowWrapper {
                         size_height - count * control_box_setting.box_height as f32
                     }
                     ControlBoxPositionAxis::Center { margin } => {
-                        (size_height - count * control_box_setting.box_height as f32 - (count - 1.0) * margin as f32) / 2.
+                        (size_height
+                            - count * control_box_setting.box_height as f32
+                            - (count - 1.0) * margin as f32)
+                            / 2.
                     }
                 };
 
@@ -379,7 +382,10 @@ impl WindowWrapper {
                         size_width - count * control_box_setting.box_width as f32
                     }
                     ControlBoxPositionAxis::Center { margin } => {
-                        (size_width - count * control_box_setting.box_width as f32 - (count - 1.0) * margin as f32) / 2.
+                        (size_width
+                            - count * control_box_setting.box_width as f32
+                            - (count - 1.0) * margin as f32)
+                            / 2.
                     }
                 };
 
