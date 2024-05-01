@@ -467,36 +467,32 @@ impl WindowWrapper {
         x: f32,
         y: f32,
     ) {
-        let mut pb = PathBuilder::new();
-
         // 横線一つ。太さは1px。色は黒
         let diff = size / 3.;
+        let diff = (diff / 2.).round() * 2.;
         let left = x + diff;
-        let right = x + size - diff;
         let top = y + size / 2.;
-        pb.move_to(left, top);
-        pb.line_to(right, top);
 
-        let path = pb.finish();
+        let width = dt.width() as isize;
+        let height = dt.height() as isize;
 
-        dt.stroke(
-            &path,
-            &Source::Solid(SolidSource {
-                r: 0xff,
-                g: 0xff,
-                b: 0xff,
-                a: 0xff,
-            }),
-            &StrokeStyle {
-                cap: LineCap::Square,
-                join: LineJoin::Miter,
-                width: 0.2,
-                miter_limit: 10.,
-                dash_array: vec![],
-                dash_offset: 0.,
-            },
-            &DrawOptions::new(),
-        );
+        let buff = dt.get_data_u8_mut();
+
+        let left = left as isize;
+        let top = top as isize;
+
+        // 横線
+        for i in 0..diff as isize {
+            let x = left + i;
+            let y = top;
+            if x >= 0 && x < width && y >= 0 && y < height {
+                let index = (y * width + x) as usize * 4;
+                buff[index] = 0xff;
+                buff[index + 1] = 0xff;
+                buff[index + 2] = 0xff;
+                buff[index + 3] = 0xff;
+            }
+        }
     }
 
     pub fn paint_control_box_maximize(
