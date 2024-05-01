@@ -16,10 +16,10 @@ pub struct WindowSetting {
 impl Default for WindowSetting {
     fn default() -> Self {
         Self {
-            left_frame_width: 5,
-            right_frame_width: 5,
-            top_frame_height: 5,
-            bottom_frame_height: 5,
+            left_frame_width: 8,
+            right_frame_width: 8,
+            top_frame_height: 8,
+            bottom_frame_height: 8,
             control_box_setting: ControlBoxSetting::default(),
         }
     }
