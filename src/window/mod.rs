@@ -23,7 +23,14 @@ use windows_sys::{
             Controls::MARGINS,
             Shell::DefSubclassProc,
             WindowsAndMessaging::{
-                AdjustWindowRectEx, GetSystemMenu, GetWindowRect, IsZoomed, TrackPopupMenu, TrackPopupMenuEx, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTGROWBOX, HTHELP, HTLEFT, HTMAXBUTTON, HTMINBUTTON, HTNOWHERE, HTREDUCE, HTRIGHT, HTSYSMENU, HTTOP, HTTOPLEFT, HTTOPRIGHT, HTZOOM, SC_CLOSE, SC_MAXIMIZE, SC_MINIMIZE, SC_RESTORE, SC_SIZE, TPM_LEFTALIGN, TPM_RETURNCMD, WM_CLOSE, WM_CONTEXTMENU, WM_LBUTTONUP, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCRBUTTONUP, WM_PAINT, WM_RBUTTONUP, WM_SYSCOMMAND, WS_CAPTION, WS_OVERLAPPEDWINDOW
+                AdjustWindowRectEx, GetSystemMenu, GetWindowRect, IsZoomed, TrackPopupMenu,
+                TrackPopupMenuEx, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTGROWBOX,
+                HTHELP, HTLEFT, HTMAXBUTTON, HTMINBUTTON, HTNOWHERE, HTREDUCE, HTRIGHT, HTSYSMENU,
+                HTTOP, HTTOPLEFT, HTTOPRIGHT, HTZOOM, SC_CLOSE, SC_MAXIMIZE, SC_MINIMIZE,
+                SC_RESTORE, SC_SIZE, TPM_LEFTALIGN, TPM_RETURNCMD, WM_CLOSE, WM_CONTEXTMENU,
+                WM_LBUTTONUP, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN,
+                WM_NCLBUTTONUP, WM_NCRBUTTONUP, WM_PAINT, WM_RBUTTONUP, WM_SYSCOMMAND, WS_CAPTION,
+                WS_OVERLAPPEDWINDOW,
             },
         },
     },
@@ -120,7 +127,15 @@ unsafe extern "system" fn wrapper_subclass_prop(
         // https://stackoverflow.com/a/22013757
         // https://learn.microsoft.com/ja-jp/windows/win32/inputdev/wm-nchittest
         let vec = vec![
-            HTCLOSE, HTMAXBUTTON, HTMINBUTTON, HTGROWBOX, HTSIZE, HTHELP, HTREDUCE, HTSYSMENU, HTZOOM,
+            HTCLOSE,
+            HTMAXBUTTON,
+            HTMINBUTTON,
+            HTGROWBOX,
+            HTSIZE,
+            HTHELP,
+            HTREDUCE,
+            HTSYSMENU,
+            HTZOOM,
         ];
 
         if vec.contains(&(wparam as u32)) {
@@ -135,19 +150,22 @@ unsafe extern "system" fn wrapper_subclass_prop(
                 let umsg = WM_SYSCOMMAND;
                 let wparam = SC_CLOSE as usize;
                 return DefSubclassProc(hwnd, umsg, wparam, lparam);
-            },
+            }
             HTMINBUTTON | HTREDUCE => {
                 let umsg = WM_SYSCOMMAND;
                 let wparam = SC_MINIMIZE as usize;
                 return DefSubclassProc(hwnd, umsg, wparam, lparam);
-            },
+            }
             HTMAXBUTTON | HTZOOM => {
                 let umsg = WM_SYSCOMMAND;
-                let wparam = if unsafe { IsZoomed(hwnd) } != 0 { SC_RESTORE as usize } else { SC_MAXIMIZE as usize };
+                let wparam = if unsafe { IsZoomed(hwnd) } != 0 {
+                    SC_RESTORE as usize
+                } else {
+                    SC_MAXIMIZE as usize
+                };
                 return DefSubclassProc(hwnd, umsg, wparam, lparam);
-            },
-            _ => {
             }
+            _ => {}
         }
     }
 

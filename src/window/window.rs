@@ -36,7 +36,8 @@ use windows_sys::Win32::{
             CloseThemeData, DrawThemeTextEx, GetThemeSysFont, OpenThemeData, OpenThemeDataEx,
             DTTOPTS, DTT_COMPOSITED, DTT_GLOWSIZE, MARGINS, TMT_CAPTIONFONT,
         },
-        Shell::SetWindowSubclass, WindowsAndMessaging::IsZoomed,
+        Shell::SetWindowSubclass,
+        WindowsAndMessaging::IsZoomed,
     },
 };
 use winit::{

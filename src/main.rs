@@ -197,7 +197,7 @@ fn main() {
             window_setting: crate::setting::window::WindowSetting {
                 control_box_setting: crate::setting::window::control_box::ControlBoxSetting {
                     caption_wide: 30,
-                    caption_direction: CaptionDirection::Left,
+                    caption_direction: CaptionDirection::Right,
                     box_width: 30,
                     box_height: 46,
                     maximize_button: true,
