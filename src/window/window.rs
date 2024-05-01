@@ -420,42 +420,43 @@ impl WindowWrapper {
         x: f32,
         y: f32,
     ) {
-        let mut pb = PathBuilder::new();
+        let width = dt.width() as isize;
+        let height = dt.height() as isize;
 
-        // 対角線二つ。太さは1px。色は黒
+        let buff = dt.get_data_u8_mut();
+
         let size = size as f32;
         let diff = size / 3.;
+        let diff = (diff / 2.).round() * 2.;
         let left = x + diff;
         let right = x + size - diff;
         let top = y + diff;
-        let bottom = y + size - diff;
 
-        pb.move_to(left, top);
-        pb.line_to(right, bottom);
+        let left = left as isize;
+        let right = right as isize;
+        let top = top as isize;
 
-        pb.move_to(right, top);
-        pb.line_to(left, bottom);
-
-        let path = pb.finish();
-
-        dt.stroke(
-            &path,
-            &Source::Solid(SolidSource {
-                r: 0xff,
-                g: 0xff,
-                b: 0xff,
-                a: 0xff,
-            }),
-            &StrokeStyle {
-                cap: LineCap::Square,
-                join: LineJoin::Miter,
-                width: 0.2,
-                miter_limit: 10.,
-                dash_array: vec![],
-                dash_offset: 0.,
-            },
-            &DrawOptions::new(),
-        );
+        // 対角線
+        for i in 0..diff as isize {
+            let x = left + i;
+            let y = top + i;
+            if x >= 0 && x < width && y >= 0 && y < height {
+                let index = (y * width + x) as usize * 4;
+                buff[index] = 0xff;
+                buff[index + 1] = 0xff;
+                buff[index + 2] = 0xff;
+                buff[index + 3] = 0xff;
+            }
+            let x = right - i - 1;
+            let y = top + i;
+            if x >= 0 && x < width && y >= 0 && y < height {
+                let index = (y * width + x) as usize * 4;
+                buff[index] = 0xff;
+                buff[index + 1] = 0xff;
+                buff[index + 2] = 0xff;
+                buff[index + 3] = 0xff;
+            }
+        }
     }
 
     pub fn paint_control_box_minimize(
