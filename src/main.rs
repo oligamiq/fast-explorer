@@ -207,7 +207,7 @@ fn main() {
                         crate::setting::window::control_box::ControlBoxPositionAxis::Center {
                             margin: 50,
                         },
-                    position_y: crate::setting::window::control_box::ControlBoxPositionAxis::Last,
+                    position_y: crate::setting::window::control_box::ControlBoxPositionAxis::First,
                 },
                 ..Default::default()
             },
