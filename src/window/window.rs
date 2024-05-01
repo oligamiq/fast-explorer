@@ -354,6 +354,7 @@ impl WindowWrapper {
                             y,
                         );
                     }
+                    y += (control_box_setting.box_height + movement) as f32;
                 }
                 if control_box_setting.close_button {
                     self.paint_control_box_close(

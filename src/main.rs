@@ -195,20 +195,20 @@ fn main() {
         hotkey_state: Some(hotkey_struct),
         setting: SettingContext::new(setting::Settings {
             window_setting: crate::setting::window::WindowSetting {
-                // control_box_setting: crate::setting::window::control_box::ControlBoxSetting {
-                //     caption_wide: 30,
-                //     caption_direction: CaptionDirection::Left,
-                //     box_width: 30,
-                //     box_height: 40,
-                //     maximize_button: true,
-                //     minimize_button: true,
-                //     close_button: true,
-                //     position_x:
-                //         crate::setting::window::control_box::ControlBoxPositionAxis::Center {
-                //             margin: 0,
-                //         },
-                //     position_y: crate::setting::window::control_box::ControlBoxPositionAxis::Last,
-                // },
+                control_box_setting: crate::setting::window::control_box::ControlBoxSetting {
+                    caption_wide: 30,
+                    caption_direction: CaptionDirection::Left,
+                    box_width: 30,
+                    box_height: 40,
+                    maximize_button: true,
+                    minimize_button: true,
+                    close_button: true,
+                    position_x:
+                        crate::setting::window::control_box::ControlBoxPositionAxis::Center {
+                            margin: 0,
+                        },
+                    position_y: crate::setting::window::control_box::ControlBoxPositionAxis::Last,
+                },
                 ..Default::default()
             },
             ..Default::default()
