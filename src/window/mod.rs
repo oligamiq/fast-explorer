@@ -323,8 +323,8 @@ fn hit_test_nca(hwnd: HWND, _w_param: WPARAM, l_param: LPARAM, setting: &WindowS
                     ControlBoxPositionAxis::Last => {
                         size_height - count * control_box_setting.box_height
                     }
-                    ControlBoxPositionAxis::Center { margin: _ } => {
-                        (size_height - count * control_box_setting.box_height) / 2
+                    ControlBoxPositionAxis::Center { margin } => {
+                        (size_height - count * control_box_setting.box_height - (count - 1) * margin) / 2
                     }
                 };
 
@@ -372,8 +372,8 @@ fn hit_test_nca(hwnd: HWND, _w_param: WPARAM, l_param: LPARAM, setting: &WindowS
                     ControlBoxPositionAxis::Last => {
                         size_width - count * control_box_setting.box_width
                     }
-                    ControlBoxPositionAxis::Center { margin: _ } => {
-                        (size_width - count * control_box_setting.box_width) / 2
+                    ControlBoxPositionAxis::Center { margin } => {
+                        (size_width - count * control_box_setting.box_width - (count - 1) * margin) / 2
                     }
                 };
                 let start_y = match control_box_setting.caption_direction {

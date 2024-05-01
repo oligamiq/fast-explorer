@@ -197,7 +197,7 @@ fn main() {
             window_setting: crate::setting::window::WindowSetting {
                 control_box_setting: crate::setting::window::control_box::ControlBoxSetting {
                     caption_wide: 30,
-                    caption_direction: CaptionDirection::Right,
+                    caption_direction: CaptionDirection::Bottom,
                     box_width: 30,
                     box_height: 46,
                     maximize_button: true,
@@ -205,7 +205,7 @@ fn main() {
                     close_button: true,
                     position_x:
                         crate::setting::window::control_box::ControlBoxPositionAxis::Center {
-                            margin: 0,
+                            margin: 50,
                         },
                     position_y: crate::setting::window::control_box::ControlBoxPositionAxis::Last,
                 },

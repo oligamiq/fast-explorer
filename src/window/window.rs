@@ -317,8 +317,8 @@ impl WindowWrapper {
                     ControlBoxPositionAxis::Last => {
                         size_height - count * control_box_setting.box_height as f32
                     }
-                    ControlBoxPositionAxis::Center { margin: _ } => {
-                        (size_height - count * control_box_setting.box_height as f32) / 2.
+                    ControlBoxPositionAxis::Center { margin } => {
+                        (size_height - count * control_box_setting.box_height as f32 - (count - 1.0) * margin as f32) / 2.
                     }
                 };
 
@@ -378,8 +378,8 @@ impl WindowWrapper {
                     ControlBoxPositionAxis::Last => {
                         size_width - count * control_box_setting.box_width as f32
                     }
-                    ControlBoxPositionAxis::Center { margin: _ } => {
-                        (size_width - count * control_box_setting.box_width as f32) / 2.
+                    ControlBoxPositionAxis::Center { margin } => {
+                        (size_width - count * control_box_setting.box_width as f32 - (count - 1.0) * margin as f32) / 2.
                     }
                 };
 
