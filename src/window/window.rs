@@ -2,29 +2,28 @@ use std::{
     ffi::{OsStr, OsString},
     iter::once,
     os::windows::ffi::{OsStrExt as _, OsStringExt as _},
-    pin::{Pin},
+    pin::Pin,
 };
 
-use raqote::{
-    DrawTarget,
-};
-use windows::{
+use raqote::
+    DrawTarget;
+use windows::
     Win32::{
         Foundation::{HWND, TRUE},
-        Graphics::Dwm::{DwmIsCompositionEnabled},
+        Graphics::Dwm::DwmIsCompositionEnabled,
         UI::WindowsAndMessaging::{
             GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_STYLE, SWP_FRAMECHANGED, WS_SYSMENU,
         },
-    },
-};
+    }
+;
 use windows_sys::Win32::{
-    Graphics::{
-        Dwm::{DwmExtendFrameIntoClientArea},
-    },
+    Graphics::
+        Dwm::DwmExtendFrameIntoClientArea,
+
     UI::{
-        Controls::{
+        Controls::
             MARGINS,
-        },
+
         Shell::SetWindowSubclass,
         WindowsAndMessaging::IsZoomed,
     },
@@ -32,7 +31,7 @@ use windows_sys::Win32::{
 use winit::{
     dpi::PhysicalSize,
     event_loop::ActiveEventLoop,
-    window::{Window},
+    window::Window,
 };
 
 use crate::{
@@ -892,10 +891,12 @@ impl WindowWrapper {
 
 // Win32_Foundation
 
+#[allow(unused)]
 pub fn encode_wide(string: impl AsRef<OsStr>) -> Vec<u16> {
     string.as_ref().encode_wide().chain(once(0)).collect()
 }
 
+#[allow(unused)]
 pub fn decode_wide(mut wide_c_string: &[u16]) -> OsString {
     if let Some(null_pos) = wide_c_string.iter().position(|c| *c == 0) {
         wide_c_string = &wide_c_string[..null_pos];

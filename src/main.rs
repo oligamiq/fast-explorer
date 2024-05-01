@@ -14,7 +14,7 @@ use setting::SettingContext;
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, DeviceId, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
-use winit::window::{WindowId};
+use winit::window::WindowId;
 
 mod window;
 use window::WindowWrapper;

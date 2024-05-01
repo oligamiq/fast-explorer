@@ -1,5 +1,5 @@
 mod window;
-use std::{mem};
+use std::mem;
 
 use winapi::shared::windowsx::{GET_X_LPARAM, GET_Y_LPARAM};
 pub use window::WindowWrapper;
@@ -34,7 +34,7 @@ use windows_sys::{
 };
 
 
-use crate::setting::window::{
+use super::setting::window::{
     control_box::{CaptionDirection, ControlBoxPositionAxis},
     PinnedWindowSetting, WindowSetting,
 };
