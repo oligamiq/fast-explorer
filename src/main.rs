@@ -199,7 +199,7 @@ fn main() {
                     caption_wide: 30,
                     caption_direction: CaptionDirection::Left,
                     box_width: 30,
-                    box_height: 40,
+                    box_height: 46,
                     maximize_button: true,
                     minimize_button: true,
                     close_button: true,
