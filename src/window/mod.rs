@@ -3,7 +3,7 @@ use std::mem;
 
 use winapi::shared::windowsx::{GET_X_LPARAM, GET_Y_LPARAM};
 pub use window::WindowWrapper;
-use windows::Win32::UI::WindowsAndMessaging::{HTCLOSE, SC_MOVE, WM_CREATE};
+use windows::Win32::UI::WindowsAndMessaging::{HTCLOSE, HTSIZE, SC_MOVE, WM_CREATE};
 use windows_sys::{
     core::HRESULT,
     Win32::{
@@ -23,20 +23,17 @@ use windows_sys::{
             Controls::MARGINS,
             Shell::DefSubclassProc,
             WindowsAndMessaging::{
-                AdjustWindowRectEx, GetSystemMenu, GetWindowRect, IsZoomed, TrackPopupMenu,
-                TrackPopupMenuEx, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTGROWBOX,
-                HTLEFT, HTMAXBUTTON, HTNOWHERE, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, SC_CLOSE,
-                SC_MAXIMIZE, SC_MINIMIZE, SC_RESTORE, SC_SIZE, TPM_LEFTALIGN, TPM_RETURNCMD,
-                WM_CONTEXTMENU, WM_LBUTTONUP, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCLBUTTONDBLCLK,
-                WM_NCRBUTTONUP, WM_PAINT, WM_RBUTTONUP, WM_SYSCOMMAND, WS_CAPTION,
-                WS_OVERLAPPEDWINDOW,
+                AdjustWindowRectEx, GetSystemMenu, GetWindowRect, IsZoomed, TrackPopupMenu, TrackPopupMenuEx, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTGROWBOX, HTHELP, HTLEFT, HTMAXBUTTON, HTMINBUTTON, HTNOWHERE, HTREDUCE, HTRIGHT, HTSYSMENU, HTTOP, HTTOPLEFT, HTTOPRIGHT, HTZOOM, SC_CLOSE, SC_MAXIMIZE, SC_MINIMIZE, SC_RESTORE, SC_SIZE, TPM_LEFTALIGN, TPM_RETURNCMD, WM_CLOSE, WM_CONTEXTMENU, WM_LBUTTONUP, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCRBUTTONUP, WM_PAINT, WM_RBUTTONUP, WM_SYSCOMMAND, WS_CAPTION, WS_OVERLAPPEDWINDOW
             },
         },
     },
 };
 use winit::monitor;
 
-use crate::setting::window::{control_box::CaptionDirection, PinnedWindowSetting, WindowSetting};
+use crate::setting::window::{
+    control_box::{CaptionDirection, ControlBoxPositionAxis},
+    PinnedWindowSetting, WindowSetting,
+};
 
 const UIDSUBCLASS: usize = 0x1599764cf41046de;
 
@@ -119,8 +116,42 @@ unsafe extern "system" fn wrapper_subclass_prop(
         // return WVR_REDRAW;
     }
 
-    // 右クリックでコンテキストメニューを表示
+    if umsg == WM_NCLBUTTONDOWN {
+        // https://stackoverflow.com/a/22013757
+        // https://learn.microsoft.com/ja-jp/windows/win32/inputdev/wm-nchittest
+        let vec = vec![
+            HTCLOSE, HTMAXBUTTON, HTMINBUTTON, HTGROWBOX, HTSIZE, HTHELP, HTREDUCE, HTSYSMENU, HTZOOM,
+        ];
 
+        if vec.contains(&(wparam as u32)) {
+            return 0;
+        }
+    }
+
+    if umsg == WM_NCLBUTTONUP {
+        // https://chokuto.ifdef.jp/urawaza/message/WM_SYSCOMMAND.html
+        match wparam as u32 {
+            HTCLOSE => {
+                let umsg = WM_SYSCOMMAND;
+                let wparam = SC_CLOSE as usize;
+                return DefSubclassProc(hwnd, umsg, wparam, lparam);
+            },
+            HTMINBUTTON | HTREDUCE => {
+                let umsg = WM_SYSCOMMAND;
+                let wparam = SC_MINIMIZE as usize;
+                return DefSubclassProc(hwnd, umsg, wparam, lparam);
+            },
+            HTMAXBUTTON | HTZOOM => {
+                let umsg = WM_SYSCOMMAND;
+                let wparam = if unsafe { IsZoomed(hwnd) } != 0 { SC_RESTORE as usize } else { SC_MAXIMIZE as usize };
+                return DefSubclassProc(hwnd, umsg, wparam, lparam);
+            },
+            _ => {
+            }
+        }
+    }
+
+    // 右クリックでコンテキストメニューを表示
     if umsg == WM_NCRBUTTONUP || umsg == WM_RBUTTONUP {
         let setting = dwrefdata as *const PinnedWindowSetting;
         let setting = &*setting;
@@ -246,14 +277,131 @@ fn hit_test_nca(hwnd: HWND, _w_param: WPARAM, l_param: LPARAM, setting: &WindowS
         }
     }
 
-    // Get the frame rectangle, adjusted for the style without a caption.
-    // let mut rc_frame = RECT {
-    //     left: 0,
-    //     top: 0,
-    //     right: 0,
-    //     bottom: 0,
-    // };
-    // unsafe { AdjustWindowRectEx(&mut rc_frame, WS_OVERLAPPEDWINDOW & !WS_CAPTION, FALSE, 0) };
+    // check control box
+    {
+        let control_box_setting = setting.control_box_setting;
+
+        let size_width = rc_window.right - rc_window.left;
+        let size_height = rc_window.bottom - rc_window.top;
+
+        let count = control_box_setting.maximize_button as i32
+            + control_box_setting.minimize_button as i32
+            + control_box_setting.close_button as i32;
+
+        match control_box_setting.caption_direction {
+            CaptionDirection::Left | CaptionDirection::Right => {
+                let movement = match control_box_setting.position_y {
+                    ControlBoxPositionAxis::Center { margin } => margin,
+                    _ => 0,
+                };
+
+                let start_x = match control_box_setting.caption_direction {
+                    CaptionDirection::Left => 0,
+                    CaptionDirection::Right => size_width - control_box_setting.caption_wide,
+                    _ => unreachable!(),
+                };
+                let start_y = match control_box_setting.position_y {
+                    ControlBoxPositionAxis::First => 0,
+                    ControlBoxPositionAxis::Last => {
+                        size_height - count * control_box_setting.box_height
+                    }
+                    ControlBoxPositionAxis::Center { margin: _ } => {
+                        (size_height - count * control_box_setting.box_height) / 2
+                    }
+                };
+
+                let mut y = start_y + rc_window.top;
+                let start_x = start_x + rc_window.left;
+
+                if control_box_setting.minimize_button {
+                    if pt_mouse.x >= start_x
+                        && pt_mouse.x < start_x + control_box_setting.box_width
+                        && pt_mouse.y >= y
+                        && pt_mouse.y < y + control_box_setting.box_height
+                    {
+                        return HTMINBUTTON as isize;
+                    }
+                    y += control_box_setting.box_height + movement;
+                }
+                if control_box_setting.maximize_button {
+                    if pt_mouse.x >= start_x
+                        && pt_mouse.x < start_x + control_box_setting.box_width
+                        && pt_mouse.y >= y
+                        && pt_mouse.y < y + control_box_setting.box_height
+                    {
+                        return HTMAXBUTTON as isize;
+                    }
+                    y += (control_box_setting.box_height + movement);
+                }
+                if control_box_setting.close_button {
+                    if pt_mouse.x >= start_x
+                        && pt_mouse.x < start_x + control_box_setting.box_width
+                        && pt_mouse.y >= y
+                        && pt_mouse.y < y + control_box_setting.box_height
+                    {
+                        return HTCLOSE as isize;
+                    }
+                }
+            }
+            CaptionDirection::Top | CaptionDirection::Bottom => {
+                let movement = match control_box_setting.position_x {
+                    ControlBoxPositionAxis::Center { margin } => margin,
+                    _ => 0,
+                };
+
+                let start_x = match control_box_setting.position_x {
+                    ControlBoxPositionAxis::First => 0,
+                    ControlBoxPositionAxis::Last => {
+                        size_width - count * control_box_setting.box_width
+                    }
+                    ControlBoxPositionAxis::Center { margin: _ } => {
+                        (size_width - count * control_box_setting.box_width) / 2
+                    }
+                };
+                let start_y = match control_box_setting.caption_direction {
+                    CaptionDirection::Top => 0,
+                    CaptionDirection::Bottom => size_height - control_box_setting.caption_wide,
+                    _ => unreachable!(),
+                };
+
+                let mut x = start_x + rc_window.left;
+                let start_y = start_y + rc_window.top;
+
+                if control_box_setting.minimize_button {
+                    if pt_mouse.x >= x
+                        && pt_mouse.x < x + control_box_setting.box_width
+                        && pt_mouse.y >= start_y
+                        && pt_mouse.y < start_y + control_box_setting.box_height
+                    {
+                        // println!("minimize_button");
+                        return HTMINBUTTON as isize;
+                    }
+                    x += control_box_setting.box_width + movement;
+                }
+                if control_box_setting.maximize_button {
+                    if pt_mouse.x >= x
+                        && pt_mouse.x < x + control_box_setting.box_width
+                        && pt_mouse.y >= start_y
+                        && pt_mouse.y < start_y + control_box_setting.box_height
+                    {
+                        // println!("maximize_button");
+                        return HTMAXBUTTON as isize;
+                    }
+                    x += (control_box_setting.box_width + movement);
+                }
+                if control_box_setting.close_button {
+                    if pt_mouse.x >= x
+                        && pt_mouse.x < x + control_box_setting.box_width
+                        && pt_mouse.y >= start_y
+                        && pt_mouse.y < start_y + control_box_setting.box_height
+                    {
+                        // println!("close_button");
+                        return HTCLOSE as isize;
+                    }
+                }
+            }
+        }
+    }
 
     // Determine if the hit test is for resizing. Default middle (1,1).
     let mut u_row: usize = 1;
@@ -266,10 +414,6 @@ fn hit_test_nca(hwnd: HWND, _w_param: WPARAM, l_param: LPARAM, setting: &WindowS
     let control_box_setting = setting.control_box_setting;
     let caption_wide = control_box_setting.caption_wide;
     let caption_direction = control_box_setting.caption_direction;
-
-    // println!(
-    //     "top: {}, bottom: {}, left: {}, right: {}",
-    //     top_ext_width, bottom_ext_width, left_ext_width, right_ext_width);
 
     // Determine if the point is at the top or bottom of the window.
     if (rc_window.top <= pt_mouse.y && pt_mouse.y < rc_window.top + top_ext_width) {

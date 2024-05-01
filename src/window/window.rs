@@ -205,9 +205,9 @@ impl WindowWrapper {
         //     set_allow_nc_paint(hwnd.0, true);
         // }
 
-        unsafe {
-            set_window_corner_radius(hwnd.0, windows_sys::Win32::Graphics::Dwm::DWMWCP_DONOTROUND)
-        };
+        // unsafe {
+        //     set_window_corner_radius(hwnd.0, windows_sys::Win32::Graphics::Dwm::DWMWCP_DONOTROUND)
+        // };
 
         // unsafe { set_transitions_force_disabled(hwnd.0, true) };
 
@@ -321,8 +321,10 @@ impl WindowWrapper {
                     }
                 };
 
-                let mut y = start_y + ((control_box_setting.box_height - box_size as i32) / 2) as f32;
-                let start_x = start_x + ((control_box_setting.box_width - box_size as i32) / 2) as f32;
+                let mut y =
+                    start_y + ((control_box_setting.box_height - box_size as i32) / 2) as f32;
+                let start_x =
+                    start_x + ((control_box_setting.box_width - box_size as i32) / 2) as f32;
 
                 if control_box_setting.minimize_button {
                     self.paint_control_box_minimize(
@@ -355,7 +357,7 @@ impl WindowWrapper {
                         y,
                     );
                 }
-            },
+            }
             CaptionDirection::Top | CaptionDirection::Bottom => {
                 let movement = match control_box_setting.position_x {
                     ControlBoxPositionAxis::Center { margin } => margin,
@@ -372,10 +374,13 @@ impl WindowWrapper {
                     }
                 };
 
-                let mut x = start_x + ((control_box_setting.box_width - box_size as i32) / 2) as f32;
+                let mut x =
+                    start_x + ((control_box_setting.box_width - box_size as i32) / 2) as f32;
                 let start_y = match control_box_setting.caption_direction {
                     CaptionDirection::Top => 0.,
-                    CaptionDirection::Bottom => size_height - control_box_setting.caption_wide as f32,
+                    CaptionDirection::Bottom => {
+                        size_height - control_box_setting.caption_wide as f32
+                    }
                     _ => unreachable!(),
                 };
 
@@ -408,7 +413,7 @@ impl WindowWrapper {
                         start_y,
                     );
                 }
-            },
+            }
         };
     }
 
