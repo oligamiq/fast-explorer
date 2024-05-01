@@ -196,9 +196,9 @@ fn main() {
         setting: SettingContext::new(setting::Settings {
             window_setting: crate::setting::window::WindowSetting {
                 control_box_setting: crate::setting::window::control_box::ControlBoxSetting {
-                    caption_wide: 30,
-                    caption_direction: CaptionDirection::Bottom,
-                    box_width: 30,
+                    caption_wide: 40,
+                    caption_direction: CaptionDirection::Left,
+                    box_width: 40,
                     box_height: 46,
                     maximize_button: true,
                     minimize_button: true,

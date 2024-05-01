@@ -461,7 +461,7 @@ impl WindowWrapper {
         let top = top as isize;
 
         // 対角線
-        for i in 0..diff as isize {
+        for i in 0..(right - left) as isize {
             let x = left + i;
             let y = top + i;
             if x >= 0 && x < width && y >= 0 && y < height {
@@ -495,6 +495,7 @@ impl WindowWrapper {
         let diff = size / 3.;
         let diff = (diff / 2.).round() * 2.;
         let left = x + diff;
+        let right = x + size - diff;
         let top = y + size / 2.;
 
         let width = dt.width() as isize;
@@ -503,10 +504,11 @@ impl WindowWrapper {
         let buff = dt.get_data_u8_mut();
 
         let left = left as isize;
+        let right = right as isize;
         let top = top as isize;
 
         // 横線
-        for i in 0..diff as isize {
+        for i in 0..(right - left) as isize {
             let x = left + i;
             let y = top;
             if x >= 0 && x < width && y >= 0 && y < height {
@@ -546,7 +548,7 @@ impl WindowWrapper {
         let bottom = bottom as isize;
 
         // 四角形
-        for i in 0..diff as isize {
+        for i in 0..(right - left) as isize {
             let x = left;
             let y = top + i;
             if x >= 0 && x < width && y >= 0 && y < height {
@@ -613,7 +615,7 @@ impl WindowWrapper {
         let bottom = bottom as isize;
 
         // 四角形
-        for i in 0..diff - 2 as isize {
+        for i in 0..(right - left) as isize {
             let x = left;
             let y = top + i;
             if x >= 0 && x < width && y >= 0 && y < height {
