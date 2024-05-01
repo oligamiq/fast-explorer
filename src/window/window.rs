@@ -6,14 +6,17 @@ use std::{
     ptr::{null, null_mut},
 };
 
+use raqote::{
+    DrawOptions, DrawTarget, LineCap, LineJoin, PathBuilder, SolidSource, Source, StrokeStyle,
+};
 use windows::{
     core::Interface,
     Win32::{
         Foundation::{HWND, TRUE},
         Graphics::Dwm::{DwmDefWindowProc, DwmIsCompositionEnabled},
         UI::WindowsAndMessaging::{
-            AdjustWindowRectEx, GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWLP_HINSTANCE,
-            GWL_STYLE, SWP_FRAMECHANGED, WS_SYSMENU,
+            AdjustWindowRectEx, GetSystemMenu, GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos,
+            GWLP_HINSTANCE, GWL_STYLE, SWP_FRAMECHANGED, WS_SYSMENU,
         },
     },
     UI::WindowManagement::{AppWindow, AppWindowTitleBar},
@@ -37,6 +40,7 @@ use windows_sys::Win32::{
     },
 };
 use winit::{
+    dpi::PhysicalSize,
     event_loop::ActiveEventLoop,
     platform::windows::{WindowAttributesExtWindows as _, WindowExtWindows as _},
     raw_window_handle::HasWindowHandle as _,
@@ -45,7 +49,10 @@ use winit::{
 
 use crate::{
     setting::{
-        window::{PinnedWindowSetting, WindowSetting},
+        window::{
+            control_box::{CaptionDirection, ControlBoxPositionAxis, ControlBoxSetting},
+            PinnedWindowSetting, WindowSetting,
+        },
         SettingContext,
     },
     window::{
@@ -124,11 +131,11 @@ impl WindowWrapper {
         println!("position: {:?}", position);
         println!("rect: {:?}", rect);
 
-        let caption_rect = unsafe { get_caption_button_rect(hwnd.0) };
-        println!(
-            "caption_rect 0: top: {}, left: {}, right: {}, bottom: {}",
-            caption_rect.top, caption_rect.left, caption_rect.right, caption_rect.bottom
-        );
+        // let caption_rect = unsafe { get_caption_button_rect(hwnd.0) };
+        // println!(
+        //     "caption_rect 0: top: {}, left: {}, right: {}, bottom: {}",
+        //     caption_rect.top, caption_rect.left, caption_rect.right, caption_rect.bottom
+        // );
 
         unsafe {
             SetWindowPos(
@@ -145,18 +152,33 @@ impl WindowWrapper {
         }
         .unwrap();
 
-        let caption_rect = unsafe { get_caption_button_rect(hwnd.0) };
-        println!(
-            "caption_rect 1: top: {}, left: {}, right: {}, bottom: {}",
-            caption_rect.top, caption_rect.left, caption_rect.right, caption_rect.bottom
-        );
+        // let caption_rect = unsafe { get_caption_button_rect(hwnd.0) };
+        // println!(
+        //     "caption_rect 1: top: {}, left: {}, right: {}, bottom: {}",
+        //     caption_rect.top, caption_rect.left, caption_rect.right, caption_rect.bottom
+        // );
 
-        let margins = MARGINS {
-            cxLeftWidth: setting.left_frame_width,
-            cxRightWidth: setting.right_frame_width,
-            cyTopHeight: setting.top_frame_height,
-            cyBottomHeight: setting.bottom_frame_height,
+        let mut margins = MARGINS {
+            cxLeftWidth: 1,
+            cxRightWidth: 1,
+            cyTopHeight: 1,
+            cyBottomHeight: 1,
         };
+        let control_box_setting = setting.control_box_setting;
+        match control_box_setting.caption_direction {
+            CaptionDirection::Left => {
+                margins.cxLeftWidth = control_box_setting.caption_wide;
+            }
+            CaptionDirection::Right => {
+                margins.cxRightWidth = control_box_setting.caption_wide;
+            }
+            CaptionDirection::Top => {
+                margins.cyTopHeight = control_box_setting.caption_wide;
+            }
+            CaptionDirection::Bottom => {
+                margins.cyBottomHeight = control_box_setting.caption_wide;
+            }
+        }
 
         let hr = unsafe { DwmExtendFrameIntoClientArea(hwnd.0, &margins) };
         if hr != 0 {
@@ -225,6 +247,7 @@ impl WindowWrapper {
 
         let width = self.window.inner_size().width;
         let height = self.window.inner_size().height;
+        println!("width: {}, height: {}", width, height);
         let mut dt = DrawTarget::new(width as i32, height as i32);
 
         let mut pb = PathBuilder::new();
@@ -245,6 +268,8 @@ impl WindowWrapper {
             &DrawOptions::new(),
         );
 
+        self.paint_control_box(self.window.inner_size(), &mut dt);
+
         let mut surface = softbuffer::Surface::new(&context, &self.window).unwrap();
         surface
             .resize(width.try_into().unwrap(), height.try_into().unwrap())
@@ -257,6 +282,258 @@ impl WindowWrapper {
         buffer.present().unwrap();
 
         // println!("paint end");
+    }
+
+    pub fn paint_control_box(&self, size: PhysicalSize<u32>, mut paint_dt: &mut DrawTarget) {
+        let setting = self.setting.as_ref();
+        let control_box_setting = setting.setting().control_box_setting;
+
+        let size_width = size.width as f32;
+        let size_height = size.height as f32;
+
+        let box_size: f32 = control_box_setting
+            .box_height
+            .min(control_box_setting.box_width) as f32;
+
+        let count = (control_box_setting.maximize_button as u32
+            + control_box_setting.minimize_button as u32
+            + control_box_setting.close_button as u32) as f32;
+
+        match control_box_setting.caption_direction {
+            CaptionDirection::Left | CaptionDirection::Right => {
+                let movement = match control_box_setting.position_y {
+                    ControlBoxPositionAxis::Center { margin } => margin,
+                    _ => 0,
+                };
+
+                let start_x: f32 = match control_box_setting.caption_direction {
+                    CaptionDirection::Left => 0.,
+                    CaptionDirection::Right => size_width - control_box_setting.caption_wide as f32,
+                    _ => unreachable!(),
+                };
+                let start_y: f32 = match control_box_setting.position_y {
+                    ControlBoxPositionAxis::First => 0.,
+                    ControlBoxPositionAxis::Last => {
+                        size_height - count * control_box_setting.box_height as f32
+                    }
+                    ControlBoxPositionAxis::Center { margin: _ } => {
+                        (size_height - count * control_box_setting.box_height as f32) / 2.
+                    }
+                };
+
+                let mut y = start_y + ((control_box_setting.box_height - box_size as i32) / 2) as f32;
+                let start_x = start_x + ((control_box_setting.box_width - box_size as i32) / 2) as f32;
+
+                if control_box_setting.minimize_button {
+                    self.paint_control_box_minimize(
+                        box_size,
+                        &control_box_setting,
+                        &mut paint_dt,
+                        start_x,
+                        y,
+                    );
+                    y += (control_box_setting.box_height + movement) as f32;
+                    println!("y2: {}", y)
+                }
+                if control_box_setting.maximize_button {
+                    self.paint_control_box_maximize(
+                        box_size,
+                        &control_box_setting,
+                        &mut paint_dt,
+                        start_x,
+                        y,
+                    );
+                    y += (control_box_setting.box_height + movement) as f32;
+                    println!("y: {}", y)
+                }
+                if control_box_setting.close_button {
+                    self.paint_control_box_close(
+                        box_size,
+                        &control_box_setting,
+                        &mut paint_dt,
+                        start_x,
+                        y,
+                    );
+                }
+            },
+            CaptionDirection::Top | CaptionDirection::Bottom => {
+                let movement = match control_box_setting.position_x {
+                    ControlBoxPositionAxis::Center { margin } => margin,
+                    _ => 0,
+                };
+
+                let start_x: f32 = match control_box_setting.position_x {
+                    ControlBoxPositionAxis::First => 0.,
+                    ControlBoxPositionAxis::Last => {
+                        size_width - count * control_box_setting.box_width as f32
+                    }
+                    ControlBoxPositionAxis::Center { margin: _ } => {
+                        (size_width - count * control_box_setting.box_width as f32) / 2.
+                    }
+                };
+
+                let mut x = start_x + ((control_box_setting.box_width - box_size as i32) / 2) as f32;
+                let start_y = match control_box_setting.caption_direction {
+                    CaptionDirection::Top => 0.,
+                    CaptionDirection::Bottom => size_height - control_box_setting.caption_wide as f32,
+                    _ => unreachable!(),
+                };
+
+                if control_box_setting.minimize_button {
+                    self.paint_control_box_minimize(
+                        box_size,
+                        &control_box_setting,
+                        &mut paint_dt,
+                        x,
+                        start_y,
+                    );
+                    x += (control_box_setting.box_width + movement) as f32;
+                }
+                if control_box_setting.maximize_button {
+                    self.paint_control_box_maximize(
+                        box_size,
+                        &control_box_setting,
+                        &mut paint_dt,
+                        x,
+                        start_y,
+                    );
+                    x += (control_box_setting.box_width + movement) as f32;
+                }
+                if control_box_setting.close_button {
+                    self.paint_control_box_close(
+                        box_size,
+                        &control_box_setting,
+                        &mut paint_dt,
+                        x,
+                        start_y,
+                    );
+                }
+            },
+        };
+    }
+
+    pub fn paint_control_box_close(
+        &self,
+        size: f32,
+        setting: &ControlBoxSetting,
+        dt: &mut DrawTarget,
+        x: f32,
+        y: f32,
+    ) {
+        let mut pb = PathBuilder::new();
+
+        // 対角線二つ。太さは1px。色は黒
+        let size = size as f32;
+        let diff = size / 3.;
+        let left = x + diff;
+        let right = x + size - diff;
+        let top = y + diff;
+        let bottom = y + size - diff;
+
+        pb.move_to(left, top);
+        pb.line_to(right, bottom);
+
+        pb.move_to(right, top);
+        pb.line_to(left, bottom);
+
+        let path = pb.finish();
+
+        dt.stroke(
+            &path,
+            &Source::Solid(SolidSource {
+                r: 0xff,
+                g: 0xff,
+                b: 0xff,
+                a: 0xff,
+            }),
+            &StrokeStyle {
+                cap: LineCap::Square,
+                join: LineJoin::Miter,
+                width: 0.2,
+                miter_limit: 10.,
+                dash_array: vec![],
+                dash_offset: 0.,
+            },
+            &DrawOptions::new(),
+        );
+    }
+
+    pub fn paint_control_box_minimize(
+        &self,
+        size: f32,
+        setting: &ControlBoxSetting,
+        dt: &mut DrawTarget,
+        x: f32,
+        y: f32,
+    ) {
+        let mut pb = PathBuilder::new();
+
+        // 横線一つ。太さは1px。色は黒
+        let diff = size / 3.;
+        let left = x + diff;
+        let right = x + size - diff;
+        let top = y + size / 2.;
+        pb.move_to(left, top);
+        pb.line_to(right, top);
+
+        let path = pb.finish();
+
+        dt.stroke(
+            &path,
+            &Source::Solid(SolidSource {
+                r: 0xff,
+                g: 0xff,
+                b: 0xff,
+                a: 0xff,
+            }),
+            &StrokeStyle {
+                cap: LineCap::Square,
+                join: LineJoin::Miter,
+                width: 0.2,
+                miter_limit: 10.,
+                dash_array: vec![],
+                dash_offset: 0.,
+            },
+            &DrawOptions::new(),
+        );
+    }
+
+    pub fn paint_control_box_maximize(
+        &self,
+        size: f32,
+        setting: &ControlBoxSetting,
+        dt: &mut DrawTarget,
+        x: f32,
+        y: f32,
+    ) {
+        let mut pb = PathBuilder::new();
+
+        // 四角形一つ。太さは1px。色は黒
+        let diff = size / 3.;
+        let left = x + diff;
+        let top = y + diff;
+        pb.rect(left, top, diff, diff);
+
+        let path = pb.finish();
+
+        dt.stroke(
+            &path,
+            &Source::Solid(SolidSource {
+                r: 0xff,
+                g: 0xff,
+                b: 0xff,
+                a: 0xff,
+            }),
+            &StrokeStyle {
+                cap: LineCap::Square,
+                join: LineJoin::Miter,
+                width: 0.2,
+                miter_limit: 10.,
+                dash_array: vec![],
+                dash_offset: 0.,
+            },
+            &DrawOptions::new(),
+        );
     }
 
     // #[inline]

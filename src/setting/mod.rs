@@ -10,6 +10,11 @@ pub struct SettingContext(Arc<RwLock<Settings>>);
 
 impl SettingContext {
     #[inline]
+    pub fn new(settings: Settings) -> Self {
+        Self(Arc::new(RwLock::new(settings)))
+    }
+
+    #[inline]
     pub fn read(&self) -> RwLockReadGuard<RawRwLock, Settings> {
         self.0.read()
     }
@@ -17,7 +22,7 @@ impl SettingContext {
 
 #[derive(Default)]
 pub struct Settings {
-    window_setting: WindowSetting,
+    pub window_setting: WindowSetting,
 }
 
 impl Settings {

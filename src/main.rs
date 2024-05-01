@@ -6,6 +6,7 @@ use global_hotkey::{
     GlobalHotKeyEvent, GlobalHotKeyEventReceiver, GlobalHotKeyManager, HotKeyState,
 };
 use parking_lot::RwLock;
+use setting::window::control_box::CaptionDirection;
 use setting::SettingContext;
 use windows::Win32::Graphics::Dwm::{self, DwmDefWindowProc};
 use windows_sys::Win32::Graphics::Gdi::{
@@ -192,6 +193,26 @@ fn main() {
     let event_loop = EventLoop::new().unwrap();
     let mut state = State {
         hotkey_state: Some(hotkey_struct),
+        setting: SettingContext::new(setting::Settings {
+            window_setting: crate::setting::window::WindowSetting {
+                // control_box_setting: crate::setting::window::control_box::ControlBoxSetting {
+                //     caption_wide: 30,
+                //     caption_direction: CaptionDirection::Left,
+                //     box_width: 30,
+                //     box_height: 40,
+                //     maximize_button: true,
+                //     minimize_button: true,
+                //     close_button: true,
+                //     position_x:
+                //         crate::setting::window::control_box::ControlBoxPositionAxis::Center {
+                //             margin: 0,
+                //         },
+                //     position_y: crate::setting::window::control_box::ControlBoxPositionAxis::Last,
+                // },
+                ..Default::default()
+            },
+            ..Default::default()
+        }),
         ..Default::default()
     };
 

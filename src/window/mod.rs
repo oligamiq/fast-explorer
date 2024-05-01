@@ -3,7 +3,7 @@ use std::mem;
 
 use winapi::shared::windowsx::{GET_X_LPARAM, GET_Y_LPARAM};
 pub use window::WindowWrapper;
-use windows::Win32::UI::WindowsAndMessaging::HTCLOSE;
+use windows::Win32::UI::WindowsAndMessaging::{HTCLOSE, SC_MOVE, WM_CREATE};
 use windows_sys::{
     core::HRESULT,
     Win32::{
@@ -23,16 +23,20 @@ use windows_sys::{
             Controls::MARGINS,
             Shell::DefSubclassProc,
             WindowsAndMessaging::{
-                AdjustWindowRectEx, GetWindowRect, IsZoomed, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT,
-                HTCAPTION, HTGROWBOX, HTLEFT, HTMAXBUTTON, HTNOWHERE, HTRIGHT, HTTOP, HTTOPLEFT,
-                HTTOPRIGHT, WM_NCCALCSIZE, WM_NCHITTEST, WM_PAINT, WS_CAPTION, WS_OVERLAPPEDWINDOW,
+                AdjustWindowRectEx, GetSystemMenu, GetWindowRect, IsZoomed, TrackPopupMenu,
+                TrackPopupMenuEx, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTGROWBOX,
+                HTLEFT, HTMAXBUTTON, HTNOWHERE, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, SC_CLOSE,
+                SC_MAXIMIZE, SC_MINIMIZE, SC_RESTORE, SC_SIZE, TPM_LEFTALIGN, TPM_RETURNCMD,
+                WM_CONTEXTMENU, WM_LBUTTONUP, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCLBUTTONDBLCLK,
+                WM_NCRBUTTONUP, WM_PAINT, WM_RBUTTONUP, WM_SYSCOMMAND, WS_CAPTION,
+                WS_OVERLAPPEDWINDOW,
             },
         },
     },
 };
 use winit::monitor;
 
-use crate::setting::window::{PinnedWindowSetting, WindowSetting};
+use crate::setting::window::{control_box::CaptionDirection, PinnedWindowSetting, WindowSetting};
 
 const UIDSUBCLASS: usize = 0x1599764cf41046de;
 
@@ -51,10 +55,15 @@ unsafe extern "system" fn wrapper_subclass_prop(
     let mut l_ret: LRESULT = 0;
 
     // 成功したか
-    let f_call_dwp = unsafe { DwmDefWindowProc(hwnd, umsg, wparam, lparam, &mut l_ret) == S_OK };
+    // let f_call_dwp = unsafe { DwmDefWindowProc(hwnd, umsg, wparam, lparam, &mut l_ret) == S_OK };
     // let f_call_dwp = true;
 
     // println!("f_call_dwp: {}", f_call_dwp);
+
+    // Shift + F10
+    if umsg == WM_CONTEXTMENU {
+        show_context_menu(lparam, hwnd);
+    }
 
     if umsg == WM_PAINT {
         // println!("WM_PAINT: {}", lparam as isize);
@@ -110,6 +119,57 @@ unsafe extern "system" fn wrapper_subclass_prop(
         // return WVR_REDRAW;
     }
 
+    // 右クリックでコンテキストメニューを表示
+
+    if umsg == WM_NCRBUTTONUP || umsg == WM_RBUTTONUP {
+        let setting = dwrefdata as *const PinnedWindowSetting;
+        let setting = &*setting;
+        let setting = setting.setting();
+
+        let pt_mouse = windows::Win32::Foundation::POINT {
+            x: GET_X_LPARAM(lparam),
+            y: GET_Y_LPARAM(lparam),
+        };
+
+        // Get the window rectangle.
+        let mut rc_window = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        unsafe { GetWindowRect(hwnd, &mut rc_window) };
+
+        if unsafe { IsZoomed(hwnd) } != 0 {
+            let monitor = unsafe {
+                MonitorFromRect(
+                    &RECT {
+                        left: 0,
+                        top: 0,
+                        right: 0,
+                        bottom: 0,
+                    },
+                    MONITOR_DEFAULTTONULL,
+                )
+            };
+            if let Ok(monitor_info) = get_monitor_info(monitor) {
+                rc_window = monitor_info.monitorInfo.rcWork;
+            }
+        }
+
+        let control_box_setting = setting.control_box_setting;
+        let caption = check_caption(
+            control_box_setting.caption_direction,
+            rc_window,
+            pt_mouse,
+            control_box_setting.caption_wide,
+        );
+
+        if caption {
+            show_context_menu(lparam, hwnd);
+        }
+    }
+
     // タップ動作の上書き
     if umsg == WM_NCHITTEST && l_ret == HTNOWHERE as isize {
         let setting = dwrefdata as *const PinnedWindowSetting;
@@ -125,11 +185,13 @@ unsafe extern "system" fn wrapper_subclass_prop(
         return l_ret;
     }
 
-    if f_call_dwp {
-        return DefSubclassProc(hwnd, umsg, wparam, lparam);
-    } else {
-        return l_ret;
-    }
+    // if f_call_dwp {
+    //     return DefSubclassProc(hwnd, umsg, wparam, lparam);
+    // } else {
+    //     return l_ret;
+    // }
+
+    return DefSubclassProc(hwnd, umsg, wparam, lparam);
 }
 
 // https://github.com/rust-windowing/winit/blob/master/src/platform_impl/windows/monitor.rs#L135
@@ -151,7 +213,7 @@ pub(crate) fn get_monitor_info(hmonitor: HMONITOR) -> Result<MONITORINFOEXW, std
 
 // https://learn.microsoft.com/ja-jp/windows/win32/inputdev/wm-nchittest
 // Hit test the frame for resizing and moving.
-fn hit_test_nca(hwnd: HWND, w_param: WPARAM, l_param: LPARAM, setting: &WindowSetting) -> LRESULT {
+fn hit_test_nca(hwnd: HWND, _w_param: WPARAM, l_param: LPARAM, setting: &WindowSetting) -> LRESULT {
     // Get the point coordinates for the hit test.
     let pt_mouse = windows::Win32::Foundation::POINT {
         x: GET_X_LPARAM(l_param),
@@ -167,33 +229,50 @@ fn hit_test_nca(hwnd: HWND, w_param: WPARAM, l_param: LPARAM, setting: &WindowSe
     };
     unsafe { GetWindowRect(hwnd, &mut rc_window) };
 
+    if unsafe { IsZoomed(hwnd) } != 0 {
+        let monitor = unsafe {
+            MonitorFromRect(
+                &RECT {
+                    left: 0,
+                    top: 0,
+                    right: 0,
+                    bottom: 0,
+                },
+                MONITOR_DEFAULTTONULL,
+            )
+        };
+        if let Ok(monitor_info) = get_monitor_info(monitor) {
+            rc_window = monitor_info.monitorInfo.rcWork;
+        }
+    }
+
     // Get the frame rectangle, adjusted for the style without a caption.
-    let mut rc_frame = RECT {
-        left: 0,
-        top: 0,
-        right: 0,
-        bottom: 0,
-    };
-    unsafe { AdjustWindowRectEx(&mut rc_frame, WS_OVERLAPPEDWINDOW & !WS_CAPTION, FALSE, 0) };
+    // let mut rc_frame = RECT {
+    //     left: 0,
+    //     top: 0,
+    //     right: 0,
+    //     bottom: 0,
+    // };
+    // unsafe { AdjustWindowRectEx(&mut rc_frame, WS_OVERLAPPEDWINDOW & !WS_CAPTION, FALSE, 0) };
 
     // Determine if the hit test is for resizing. Default middle (1,1).
     let mut u_row: usize = 1;
     let mut u_col: usize = 1;
-    let mut f_on_resize_border = false;
 
     let top_ext_width = setting.top_frame_height;
     let bottom_ext_width = setting.bottom_frame_height;
     let left_ext_width = setting.left_frame_width;
     let right_ext_width = setting.right_frame_width;
+    let control_box_setting = setting.control_box_setting;
+    let caption_wide = control_box_setting.caption_wide;
+    let caption_direction = control_box_setting.caption_direction;
 
     // println!(
     //     "top: {}, bottom: {}, left: {}, right: {}",
     //     top_ext_width, bottom_ext_width, left_ext_width, right_ext_width);
 
     // Determine if the point is at the top or bottom of the window.
-    // if (pt_mouse.y >= rc_window.top && pt_mouse.y < rc_window.top + TOPEXTENDWIDTH) {
-    if (pt_mouse.y >= rc_window.top && pt_mouse.y < rc_window.top + top_ext_width) {
-        f_on_resize_border = (pt_mouse.y < (rc_window.top - rc_frame.top));
+    if (rc_window.top <= pt_mouse.y && pt_mouse.y < rc_window.top + top_ext_width) {
         u_row = 0;
     } else if (pt_mouse.y < rc_window.bottom && pt_mouse.y >= rc_window.bottom - bottom_ext_width) {
         u_row = 2;
@@ -206,18 +285,112 @@ fn hit_test_nca(hwnd: HWND, w_param: WPARAM, l_param: LPARAM, setting: &WindowSe
         u_col = 2; // right side
     }
 
+    // println!("left: {}, top: {}, right: {}, bottom: {}", rc_window.left, rc_window.top, rc_window.right, rc_window.bottom);
+
+    let caption = check_caption(caption_direction, rc_window, pt_mouse, caption_wide);
+
+    // println!("caption: {}", caption);
+
     // Hit test (HTTOPLEFT, ... HTBOTTOMRIGHT)
     let hit_tests: Vec<Vec<u32>> = vec![
-        vec![
-            HTTOPLEFT,
-            if f_on_resize_border { HTTOP } else { HTCAPTION },
-            HTTOPRIGHT,
-        ],
-        vec![HTLEFT, HTNOWHERE, HTRIGHT],
+        vec![HTTOPLEFT, HTTOP, HTTOPRIGHT],
+        vec![HTLEFT, if caption { HTCAPTION } else { HTNOWHERE }, HTRIGHT],
         vec![HTBOTTOMLEFT, HTBOTTOM, HTBOTTOMRIGHT],
     ];
 
     return hit_tests[u_row][u_col] as isize;
+}
+
+pub fn check_caption(
+    caption_direction: CaptionDirection,
+    rc_window: RECT,
+    pt_mouse: windows::Win32::Foundation::POINT,
+    caption_wide: i32,
+) -> bool {
+    let caption = match caption_direction {
+        CaptionDirection::Top => {
+            if rc_window.top <= pt_mouse.y && pt_mouse.y < rc_window.top + caption_wide {
+                true
+            } else {
+                false
+            }
+        }
+        CaptionDirection::Bottom => {
+            if pt_mouse.y < rc_window.bottom && pt_mouse.y >= rc_window.bottom - caption_wide {
+                true
+            } else {
+                false
+            }
+        }
+        CaptionDirection::Left => {
+            if rc_window.left <= pt_mouse.x && pt_mouse.x < rc_window.left + caption_wide {
+                true
+            } else {
+                false
+            }
+        }
+        CaptionDirection::Right => {
+            if pt_mouse.x < rc_window.right && pt_mouse.x >= rc_window.right - caption_wide {
+                true
+            } else {
+                false
+            }
+        }
+    };
+
+    caption
+}
+
+pub fn show_context_menu(lparam: LPARAM, hwnd: HWND) -> LRESULT {
+    println!("WM_CONTEXTMENU: {}", lparam as isize);
+
+    // https://learn.microsoft.com/windows/win32/menurc/wm-contextmenu
+
+    let x_pos = GET_X_LPARAM(lparam);
+    let y_pos = GET_Y_LPARAM(lparam);
+
+    // https://learn.microsoft.com/ja-jp/windows/win32/api/winuser/nf-winuser-trackpopupmenu
+    let system_menu_handle = unsafe { GetSystemMenu(hwnd, false as i32) };
+    println!("system_menu_handle: {:?}", system_menu_handle);
+
+    // https://learn.microsoft.com/ja-jp/windows/win32/api/winuser/nf-winuser-trackpopupmenuex
+    let wparam = unsafe {
+        TrackPopupMenuEx(
+            system_menu_handle,
+            TPM_RETURNCMD,
+            x_pos,
+            y_pos,
+            hwnd,
+            std::ptr::null(),
+        )
+    };
+    println!("w_param: {}", wparam);
+
+    let umsg = WM_SYSCOMMAND;
+
+    match wparam as u32 {
+        SC_MAXIMIZE => {
+            println!("SC_MAXIMIZE");
+        }
+        SC_RESTORE => {
+            println!("SC_RESTORE");
+        }
+        SC_CLOSE => {
+            println!("SC_CLOSE");
+        }
+        SC_MOVE => {
+            println!("SC_MOVE");
+        }
+        SC_MINIMIZE => {
+            println!("SC_MINIMIZE");
+        }
+        SC_SIZE => {
+            println!("SC_SIZE");
+        }
+        _ => {}
+    }
+
+    return unsafe { DefSubclassProc(hwnd, umsg, wparam as usize, lparam) };
 }
 
 // https://learn.microsoft.com/ja-jp/windows/win32/api/dwmapi/ne-dwmapi-dwmwindowattribute
