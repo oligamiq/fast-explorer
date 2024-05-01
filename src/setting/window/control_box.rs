@@ -23,7 +23,7 @@ impl Default for ControlBoxSetting {
         Self {
             caption_wide: 30,
             caption_direction: CaptionDirection::Top,
-            box_width: 40,
+            box_width: 46,
             box_height: 30,
             maximize_button: true,
             minimize_button: true,
