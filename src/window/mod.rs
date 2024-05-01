@@ -1,17 +1,17 @@
 mod window;
-use std::{mem, rc};
+use std::{mem};
 
 use winapi::shared::windowsx::{GET_X_LPARAM, GET_Y_LPARAM};
 pub use window::WindowWrapper;
-use windows::Win32::UI::WindowsAndMessaging::{HTCLOSE, HTSIZE, SC_MOVE, WM_CREATE};
+use windows::Win32::UI::WindowsAndMessaging::{HTCLOSE, HTSIZE, SC_MOVE};
 use windows_sys::{
     core::HRESULT,
     Win32::{
-        Foundation::{FALSE, HWND, LPARAM, LRESULT, RECT, S_OK, WPARAM},
+        Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM},
         Graphics::{
             Dwm::{
-                DwmDefWindowProc, DwmExtendFrameIntoClientArea, DwmGetWindowAttribute,
-                DwmSetWindowAttribute, DWMWA_CAPTION_BUTTON_BOUNDS, DWMWCP_DONOTROUND,
+                DwmGetWindowAttribute,
+                DwmSetWindowAttribute, DWMWA_CAPTION_BUTTON_BOUNDS,
                 DWM_WINDOW_CORNER_PREFERENCE,
             },
             Gdi::{
@@ -20,22 +20,19 @@ use windows_sys::{
             },
         },
         UI::{
-            Controls::MARGINS,
             Shell::DefSubclassProc,
             WindowsAndMessaging::{
-                AdjustWindowRectEx, GetSystemMenu, GetWindowRect, IsZoomed, TrackPopupMenu,
+                GetSystemMenu, GetWindowRect, IsZoomed,
                 TrackPopupMenuEx, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTGROWBOX,
                 HTHELP, HTLEFT, HTMAXBUTTON, HTMINBUTTON, HTNOWHERE, HTREDUCE, HTRIGHT, HTSYSMENU,
                 HTTOP, HTTOPLEFT, HTTOPRIGHT, HTZOOM, SC_CLOSE, SC_MAXIMIZE, SC_MINIMIZE,
-                SC_RESTORE, SC_SIZE, TPM_LEFTALIGN, TPM_RETURNCMD, WM_CLOSE, WM_CONTEXTMENU,
-                WM_LBUTTONUP, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN,
-                WM_NCLBUTTONUP, WM_NCRBUTTONUP, WM_PAINT, WM_RBUTTONUP, WM_SYSCOMMAND, WS_CAPTION,
-                WS_OVERLAPPEDWINDOW,
+                SC_RESTORE, SC_SIZE, TPM_RETURNCMD, WM_CONTEXTMENU, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCLBUTTONDOWN,
+                WM_NCLBUTTONUP, WM_NCRBUTTONUP, WM_PAINT, WM_RBUTTONUP, WM_SYSCOMMAND,
             },
         },
     },
 };
-use winit::monitor;
+
 
 use crate::setting::window::{
     control_box::{CaptionDirection, ControlBoxPositionAxis},

@@ -1,40 +1,29 @@
 use std::{
-    ffi::{c_void, OsStr, OsString},
+    ffi::{OsStr, OsString},
     iter::once,
     os::windows::ffi::{OsStrExt as _, OsStringExt as _},
-    pin::{pin, Pin},
-    ptr::{null, null_mut},
+    pin::{Pin},
 };
 
 use raqote::{
-    DrawOptions, DrawTarget, LineCap, LineJoin, PathBuilder, SolidSource, Source, StrokeStyle,
+    DrawTarget,
 };
 use windows::{
-    core::Interface,
     Win32::{
         Foundation::{HWND, TRUE},
-        Graphics::Dwm::{DwmDefWindowProc, DwmIsCompositionEnabled},
+        Graphics::Dwm::{DwmIsCompositionEnabled},
         UI::WindowsAndMessaging::{
-            AdjustWindowRectEx, GetSystemMenu, GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos,
-            GWLP_HINSTANCE, GWL_STYLE, SWP_FRAMECHANGED, WS_SYSMENU,
+            GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_STYLE, SWP_FRAMECHANGED, WS_SYSMENU,
         },
     },
-    UI::WindowManagement::{AppWindow, AppWindowTitleBar},
 };
 use windows_sys::Win32::{
-    Foundation::POINT,
     Graphics::{
-        Dwm::{DwmExtendFrameIntoClientArea, DWMNCRP_ENABLED, DWMNCRP_USEWINDOWSTYLE},
-        Gdi::{
-            BeginPaint, BitBlt, CreateCompatibleDC, CreateDIBSection, CreateFontIndirectW,
-            DeleteObject, EndPaint, SelectObject, TextOutW, BITMAPINFO, BITMAPINFOHEADER, DT_LEFT,
-            DT_WORD_ELLIPSIS, LOGFONTW, PAINTSTRUCT, RGBQUAD, SRCCOPY,
-        },
+        Dwm::{DwmExtendFrameIntoClientArea},
     },
     UI::{
         Controls::{
-            CloseThemeData, DrawThemeTextEx, GetThemeSysFont, OpenThemeData, OpenThemeDataEx,
-            DTTOPTS, DTT_COMPOSITED, DTT_GLOWSIZE, MARGINS, TMT_CAPTIONFONT,
+            MARGINS,
         },
         Shell::SetWindowSubclass,
         WindowsAndMessaging::IsZoomed,
@@ -43,23 +32,19 @@ use windows_sys::Win32::{
 use winit::{
     dpi::PhysicalSize,
     event_loop::ActiveEventLoop,
-    platform::windows::{WindowAttributesExtWindows as _, WindowExtWindows as _},
-    raw_window_handle::HasWindowHandle as _,
-    window::{Window, WindowButtons},
+    window::{Window},
 };
 
 use crate::{
     setting::{
         window::{
             control_box::{CaptionDirection, ControlBoxPositionAxis, ControlBoxSetting},
-            PinnedWindowSetting, WindowSetting,
+            PinnedWindowSetting,
         },
         SettingContext,
     },
     window::{
-        get_caption_button_rect, get_extended_frame_bounds, get_nc_rendering_policy,
-        set_allow_nc_paint, set_nc_rendering_policy, set_transitions_force_disabled,
-        set_window_corner_radius, wrapper_subclass_prop, UIDSUBCLASS,
+        get_caption_button_rect, wrapper_subclass_prop, UIDSUBCLASS,
     },
 };
 
@@ -83,7 +68,7 @@ impl WindowWrapper {
         // window = window.with_enabled_buttons(WindowButtons::CLOSE);
         // let window = window.with_active(false);
 
-        let mut window = event_loop.create_window(window).unwrap();
+        let window = event_loop.create_window(window).unwrap();
 
         window.focus_window();
 
@@ -445,7 +430,7 @@ impl WindowWrapper {
     pub fn paint_control_box_close(
         &self,
         size: f32,
-        setting: &ControlBoxSetting,
+        _setting: &ControlBoxSetting,
         dt: &mut DrawTarget,
         x: f32,
         y: f32,
@@ -492,7 +477,7 @@ impl WindowWrapper {
     pub fn paint_control_box_minimize(
         &self,
         size: f32,
-        setting: &ControlBoxSetting,
+        _setting: &ControlBoxSetting,
         dt: &mut DrawTarget,
         x: f32,
         y: f32,
@@ -530,7 +515,7 @@ impl WindowWrapper {
     pub fn paint_control_box_maximize(
         &self,
         size: f32,
-        setting: &ControlBoxSetting,
+        _setting: &ControlBoxSetting,
         dt: &mut DrawTarget,
         x: f32,
         y: f32,
@@ -541,7 +526,7 @@ impl WindowWrapper {
         let top = y + diff;
         let right = x + size - diff;
         let bottom = y + size - diff;
-        let diff = diff as isize;
+        let _diff = diff as isize;
 
         let width = dt.width() as isize;
         let height = dt.height() as isize;
@@ -597,7 +582,7 @@ impl WindowWrapper {
     pub fn paint_control_box_restore(
         &self,
         size: f32,
-        setting: &ControlBoxSetting,
+        _setting: &ControlBoxSetting,
         dt: &mut DrawTarget,
         x: f32,
         y: f32,
@@ -608,7 +593,7 @@ impl WindowWrapper {
         let top = y + diff + 2.;
         let right = x + size - diff - 2.;
         let bottom = y + size - diff;
-        let diff = diff as isize;
+        let _diff = diff as isize;
 
         let width = dt.width() as isize;
         let height = dt.height() as isize;

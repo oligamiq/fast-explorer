@@ -1,23 +1,20 @@
 use std::collections::HashMap;
-use std::ptr::null_mut;
 
-use global_hotkey::hotkey::{self, Code, HotKey, Modifiers};
+
+use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{
     GlobalHotKeyEvent, GlobalHotKeyEventReceiver, GlobalHotKeyManager, HotKeyState,
 };
-use parking_lot::RwLock;
-use setting::window::control_box::CaptionDirection;
+
+
 use setting::SettingContext;
-use windows::Win32::Graphics::Dwm::{self, DwmDefWindowProc};
-use windows_sys::Win32::Graphics::Gdi::{
-    BeginPaint, CreateCompatibleDC, CreateDIBSection, SelectObject, BITMAPINFO, BITMAPINFOHEADER,
-    PAINTSTRUCT, RGBQUAD,
-};
-use windows_sys::Win32::UI::Controls::OpenThemeData;
+
+
+
 use winit::application::ApplicationHandler;
-use winit::event::{DeviceEvent, DeviceId, Event, WindowEvent};
+use winit::event::{DeviceEvent, DeviceId, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
-use winit::window::{Window, WindowId};
+use winit::window::{WindowId};
 
 mod window;
 use window::WindowWrapper;
@@ -78,7 +75,7 @@ impl ApplicationHandler for State {
 
     fn window_event(
         &mut self,
-        event_loop: &ActiveEventLoop,
+        _event_loop: &ActiveEventLoop,
         window_id: WindowId,
         event: WindowEvent,
     ) {
@@ -139,8 +136,8 @@ impl ApplicationHandler for State {
     fn device_event(
         &mut self,
         event_loop: &ActiveEventLoop,
-        device_id: DeviceId,
-        event: DeviceEvent,
+        _device_id: DeviceId,
+        _event: DeviceEvent,
     ) {
         // println!("device event: {event:?}");
 
