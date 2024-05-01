@@ -459,46 +459,57 @@ fn hit_test_nca(hwnd: HWND, _w_param: WPARAM, l_param: LPARAM, setting: &WindowS
         }
     }
 
-    // Determine if the hit test is for resizing. Default middle (1,1).
-    let mut u_row: usize = 1;
-    let mut u_col: usize = 1;
+    if !is_zoomed {
+        // Determine if the hit test is for resizing. Default middle (1,1).
+        let mut u_row: usize = 1;
+        let mut u_col: usize = 1;
 
-    let top_ext_width = setting.top_frame_height;
-    let bottom_ext_width = setting.bottom_frame_height;
-    let left_ext_width = setting.left_frame_width;
-    let right_ext_width = setting.right_frame_width;
-    let control_box_setting = setting.control_box_setting;
-    let caption_wide = control_box_setting.caption_wide;
-    let caption_direction = control_box_setting.caption_direction;
+        let top_ext_width = setting.top_frame_height;
+        let bottom_ext_width = setting.bottom_frame_height;
+        let left_ext_width = setting.left_frame_width;
+        let right_ext_width = setting.right_frame_width;
+        let control_box_setting = setting.control_box_setting;
+        let caption_wide = control_box_setting.caption_wide;
+        let caption_direction = control_box_setting.caption_direction;
 
-    // Determine if the point is at the top or bottom of the window.
-    if rc_window.top <= pt_mouse.y && pt_mouse.y < rc_window.top + top_ext_width {
-        u_row = 0;
-    } else if rc_window.bottom - bottom_ext_width <= pt_mouse.y && pt_mouse.y < rc_window.bottom {
-        u_row = 2;
+        // Determine if the point is at the top or bottom of the window.
+        if rc_window.top <= pt_mouse.y && pt_mouse.y < rc_window.top + top_ext_width {
+            u_row = 0;
+        } else if rc_window.bottom - bottom_ext_width <= pt_mouse.y && pt_mouse.y < rc_window.bottom
+        {
+            u_row = 2;
+        }
+
+        // Determine if the point is at the left or right of the window.
+        if rc_window.left <= pt_mouse.x && pt_mouse.x < rc_window.left + left_ext_width {
+            u_col = 0; // left side
+        } else if rc_window.right - right_ext_width <= pt_mouse.x && pt_mouse.x < rc_window.right {
+            u_col = 2; // right side
+        }
+
+        // println!("left: {}, top: {}, right: {}, bottom: {}", rc_window.left, rc_window.top, rc_window.right, rc_window.bottom);
+
+        let caption = check_caption(caption_direction, rc_window, pt_mouse, caption_wide);
+
+        // println!("caption: {}", caption);
+
+        // Hit test (HTTOPLEFT, ... HTBOTTOMRIGHT)
+        let hit_tests: Vec<Vec<u32>> = vec![
+            vec![HTTOPLEFT, HTTOP, HTTOPRIGHT],
+            vec![HTLEFT, if caption { HTCAPTION } else { HTNOWHERE }, HTRIGHT],
+            vec![HTBOTTOMLEFT, HTBOTTOM, HTBOTTOMRIGHT],
+        ];
+
+        return hit_tests[u_row][u_col] as isize;
+    } else {
+        let control_box_setting = setting.control_box_setting;
+        let caption_wide = control_box_setting.caption_wide;
+        let caption_direction = control_box_setting.caption_direction;
+
+        let caption = check_caption(caption_direction, rc_window, pt_mouse, caption_wide);
+
+        return if caption { HTCAPTION } else { HTNOWHERE } as isize;
     }
-
-    // Determine if the point is at the left or right of the window.
-    if rc_window.left <= pt_mouse.x && pt_mouse.x < rc_window.left + left_ext_width {
-        u_col = 0; // left side
-    } else if rc_window.right - right_ext_width <= pt_mouse.x && pt_mouse.x < rc_window.right {
-        u_col = 2; // right side
-    }
-
-    // println!("left: {}, top: {}, right: {}, bottom: {}", rc_window.left, rc_window.top, rc_window.right, rc_window.bottom);
-
-    let caption = check_caption(caption_direction, rc_window, pt_mouse, caption_wide);
-
-    // println!("caption: {}", caption);
-
-    // Hit test (HTTOPLEFT, ... HTBOTTOMRIGHT)
-    let hit_tests: Vec<Vec<u32>> = vec![
-        vec![HTTOPLEFT, HTTOP, HTTOPRIGHT],
-        vec![HTLEFT, if caption { HTCAPTION } else { HTNOWHERE }, HTRIGHT],
-        vec![HTBOTTOMLEFT, HTBOTTOM, HTBOTTOMRIGHT],
-    ];
-
-    return hit_tests[u_row][u_col] as isize;
 }
 
 pub fn check_caption(
