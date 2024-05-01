@@ -36,7 +36,7 @@ use windows_sys::Win32::{
             CloseThemeData, DrawThemeTextEx, GetThemeSysFont, OpenThemeData, OpenThemeDataEx,
             DTTOPTS, DTT_COMPOSITED, DTT_GLOWSIZE, MARGINS, TMT_CAPTIONFONT,
         },
-        Shell::SetWindowSubclass,
+        Shell::SetWindowSubclass, WindowsAndMessaging::IsZoomed,
     },
 };
 use winit::{
@@ -335,18 +335,25 @@ impl WindowWrapper {
                         y,
                     );
                     y += (control_box_setting.box_height + movement) as f32;
-                    println!("y2: {}", y)
                 }
                 if control_box_setting.maximize_button {
-                    self.paint_control_box_maximize(
-                        box_size,
-                        &control_box_setting,
-                        &mut paint_dt,
-                        start_x,
-                        y,
-                    );
-                    y += (control_box_setting.box_height + movement) as f32;
-                    println!("y: {}", y)
+                    if unsafe { IsZoomed(u64::from(self.window.id()) as isize) } != 0 {
+                        self.paint_control_box_restore(
+                            box_size,
+                            &control_box_setting,
+                            &mut paint_dt,
+                            start_x,
+                            y,
+                        );
+                    } else {
+                        self.paint_control_box_maximize(
+                            box_size,
+                            &control_box_setting,
+                            &mut paint_dt,
+                            start_x,
+                            y,
+                        );
+                    }
                 }
                 if control_box_setting.close_button {
                     self.paint_control_box_close(
@@ -395,13 +402,23 @@ impl WindowWrapper {
                     x += (control_box_setting.box_width + movement) as f32;
                 }
                 if control_box_setting.maximize_button {
-                    self.paint_control_box_maximize(
-                        box_size,
-                        &control_box_setting,
-                        &mut paint_dt,
-                        x,
-                        start_y,
-                    );
+                    if unsafe { IsZoomed(u64::from(self.window.id()) as isize) } != 0 {
+                        self.paint_control_box_restore(
+                            box_size,
+                            &control_box_setting,
+                            &mut paint_dt,
+                            x,
+                            start_y,
+                        );
+                    } else {
+                        self.paint_control_box_maximize(
+                            box_size,
+                            &control_box_setting,
+                            &mut paint_dt,
+                            x,
+                            start_y,
+                        );
+                    }
                     x += (control_box_setting.box_width + movement) as f32;
                 }
                 if control_box_setting.close_button {
@@ -566,6 +583,111 @@ impl WindowWrapper {
             }
         }
     }
+
+    pub fn paint_control_box_restore(
+        &self,
+        size: f32,
+        setting: &ControlBoxSetting,
+        dt: &mut DrawTarget,
+        x: f32,
+        y: f32,
+    ) {
+        let diff = size / 3.;
+        let diff = (diff / 2.).round() * 2.;
+        let left = x + diff;
+        let top = y + diff + 2.;
+        let right = x + size - diff - 2.;
+        let bottom = y + size - diff;
+        let diff = diff as isize;
+
+        let width = dt.width() as isize;
+        let height = dt.height() as isize;
+
+        let buff = dt.get_data_u8_mut();
+
+        let left = left as isize;
+        let top = top as isize;
+        let right = right as isize;
+        let bottom = bottom as isize;
+
+        // 四角形
+        for i in 0..diff - 2 as isize {
+            let x = left;
+            let y = top + i;
+            if x >= 0 && x < width && y >= 0 && y < height {
+                let index = (y * width + x) as usize * 4;
+                buff[index] = 0xff;
+                buff[index + 1] = 0xff;
+                buff[index + 2] = 0xff;
+                buff[index + 3] = 0xff;
+            }
+            let x = right - 1;
+            let y = top + i;
+            if x >= 0 && x < width && y >= 0 && y < height {
+                let index = (y * width + x) as usize * 4;
+                buff[index] = 0xff;
+                buff[index + 1] = 0xff;
+                buff[index + 2] = 0xff;
+                buff[index + 3] = 0xff;
+            }
+            let x = left + i;
+            let y = top;
+            if x >= 0 && x < width && y >= 0 && y < height {
+                let index = (y * width + x) as usize * 4;
+                buff[index] = 0xff;
+                buff[index + 1] = 0xff;
+                buff[index + 2] = 0xff;
+                buff[index + 3] = 0xff;
+            }
+            let x = left + i;
+            let y = bottom - 1;
+            if x >= 0 && x < width && y >= 0 && y < height {
+                let index = (y * width + x) as usize * 4;
+                buff[index] = 0xff;
+                buff[index + 1] = 0xff;
+                buff[index + 2] = 0xff;
+                buff[index + 3] = 0xff;
+            }
+        }
+
+        let left = left + 3;
+        let top = top - 2;
+        let right = right + 2;
+        let bottom = bottom - 3;
+
+        for i in left..right - 1 {
+            let x = i;
+            let y = top;
+            if x >= 0 && x < width && y >= 0 && y < height {
+                let index = (y * width + x) as usize * 4;
+                buff[index] = 0xff;
+                buff[index + 1] = 0xff;
+                buff[index + 2] = 0xff;
+                buff[index + 3] = 0xff;
+            }
+        }
+        for i in top + 1..bottom {
+            let x = right - 1;
+            let y = i;
+            if x >= 0 && x < width && y >= 0 && y < height {
+                let index = (y * width + x) as usize * 4;
+                buff[index] = 0xff;
+                buff[index + 1] = 0xff;
+                buff[index + 2] = 0xff;
+                buff[index + 3] = 0xff;
+            }
+        }
+        let x = right - 2;
+        let y = top + 1;
+        if x >= 0 && x < width && y >= 0 && y < height {
+            let index = (y * width + x) as usize * 4;
+            buff[index] = 0xff;
+            buff[index + 1] = 0xff;
+            buff[index + 2] = 0xff;
+            buff[index + 3] = 0xff;
+        }
+    }
+
     // #[inline]
     // pub fn paint(
     //     &self,
