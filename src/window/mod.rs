@@ -151,12 +151,14 @@ unsafe extern "system" fn wrapper_subclass_prop(
                 let wparam = SC_CLOSE as usize;
                 return DefSubclassProc(hwnd, umsg, wparam, lparam);
             }
-            HTMINBUTTON | HTREDUCE => {
+            // HTMINBUTTON | HTREDUCE => {
+            HTMINBUTTON => {
                 let umsg = WM_SYSCOMMAND;
                 let wparam = SC_MINIMIZE as usize;
                 return DefSubclassProc(hwnd, umsg, wparam, lparam);
             }
-            HTMAXBUTTON | HTZOOM => {
+            // HTMAXBUTTON | HTZOOM => {
+            HTMAXBUTTON => {
                 let umsg = WM_SYSCOMMAND;
                 let wparam = if unsafe { IsZoomed(hwnd) } != 0 {
                     SC_RESTORE as usize
@@ -418,10 +420,10 @@ fn hit_test_nca(hwnd: HWND, _w_param: WPARAM, l_param: LPARAM, setting: &WindowS
                 let start_y = start_y + rc_window.top;
 
                 if control_box_setting.minimize_button {
-                    if pt_mouse.x >= x
+                    if x <= pt_mouse.x
                         && pt_mouse.x < x + control_box_setting.box_width
-                        && pt_mouse.y >= start_y
-                        && pt_mouse.y < start_y + control_box_setting.box_height
+                        && start_y <= pt_mouse.y
+                        && pt_mouse.y < outer_y
                         && first_overlay_frame_x <= pt_mouse.x
                         && pt_mouse.x < last_overlay_frame_x
                     {
@@ -431,10 +433,10 @@ fn hit_test_nca(hwnd: HWND, _w_param: WPARAM, l_param: LPARAM, setting: &WindowS
                     x += control_box_setting.box_width + movement;
                 }
                 if control_box_setting.maximize_button {
-                    if pt_mouse.x >= x
+                    if x <= pt_mouse.x
                         && pt_mouse.x < x + control_box_setting.box_width
-                        && pt_mouse.y >= start_y
-                        && pt_mouse.y < start_y + control_box_setting.box_height
+                        && start_y <= pt_mouse.y
+                        && pt_mouse.y < outer_y
                         && first_overlay_frame_x <= pt_mouse.x
                         && pt_mouse.x < last_overlay_frame_x
                     {
@@ -444,10 +446,10 @@ fn hit_test_nca(hwnd: HWND, _w_param: WPARAM, l_param: LPARAM, setting: &WindowS
                     x += control_box_setting.box_width + movement;
                 }
                 if control_box_setting.close_button {
-                    if pt_mouse.x >= x
+                    if x <= pt_mouse.x
                         && pt_mouse.x < x + control_box_setting.box_width
-                        && pt_mouse.y >= start_y
-                        && pt_mouse.y < start_y + control_box_setting.box_height
+                        && start_y <= pt_mouse.y
+                        && pt_mouse.y < outer_y
                         && first_overlay_frame_x <= pt_mouse.x
                         && pt_mouse.x < last_overlay_frame_x
                     {
