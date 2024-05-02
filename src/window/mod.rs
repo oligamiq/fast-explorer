@@ -323,8 +323,8 @@ fn hit_test_nca(hwnd: HWND, _w_param: WPARAM, l_param: LPARAM, setting: &WindowS
                         rc_window.left + control_box_setting.box_width,
                     ),
                     CaptionDirection::Right => (
-                        size_width - control_box_setting.caption_wide,
-                        rc_window.left + size_width - control_box_setting.box_width,
+                        size_width - control_box_setting.box_width,
+                        rc_window.right - overlay_caption_frame_width,
                     ),
                     _ => unreachable!(),
                 };

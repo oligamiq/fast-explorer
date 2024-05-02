@@ -102,7 +102,7 @@ impl ApplicationHandler for State {
                     return;
                 }
                 WindowEvent::Focused(focus) => {
-                    println!("Window focused: {focus}");
+                    // println!("Window focused: {focus}");
                 }
                 _ => {}
             }
@@ -190,23 +190,23 @@ fn main() {
     let mut state = State {
         hotkey_state: Some(hotkey_struct),
         setting: SettingContext::new(setting::Settings {
-            // window_setting: crate::setting::window::WindowSetting {
-            //     control_box_setting: crate::setting::window::control_box::ControlBoxSetting {
-            //         caption_wide: 40,
-            //         caption_direction: CaptionDirection::Left,
-            //         box_width: 40,
-            //         box_height: 46,
-            //         maximize_button: true,
-            //         minimize_button: true,
-            //         close_button: true,
-            //         position_x:
-            //             crate::setting::window::control_box::ControlBoxPositionAxis::Center {
-            //                 margin: 50,
-            //             },
-            //         position_y: crate::setting::window::control_box::ControlBoxPositionAxis::First,
-            //     },
-            //     ..Default::default()
-            // },
+            window_setting: crate::setting::window::WindowSetting {
+                control_box_setting: crate::setting::window::control_box::ControlBoxSetting {
+                    caption_wide: 40,
+                    caption_direction: setting::window::control_box::CaptionDirection::Right,
+                    box_width: 40,
+                    box_height: 46,
+                    maximize_button: true,
+                    minimize_button: true,
+                    close_button: true,
+                    position_x:
+                        crate::setting::window::control_box::ControlBoxPositionAxis::Center {
+                            margin: 0,
+                        },
+                    position_y: crate::setting::window::control_box::ControlBoxPositionAxis::Center { margin: 0 }
+                },
+                ..Default::default()
+            },
             ..Default::default()
         }),
         ..Default::default()
