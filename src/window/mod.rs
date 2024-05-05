@@ -113,6 +113,10 @@ unsafe extern "system" fn wrapper_subclass_prop(
             if let Ok(monitor_info) = get_monitor_info(monitor) {
                 (*params).rgrc[0] = monitor_info.monitorInfo.rcWork;
             }
+        } else {
+            // expand accent color frame
+            (*params).rgrc[0].top += 1;
+            (*params).rgrc[0].bottom += 1;
         }
 
         return 0;
