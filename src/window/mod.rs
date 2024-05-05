@@ -115,8 +115,11 @@ unsafe extern "system" fn wrapper_subclass_prop(
             }
         } else {
             // expand accent color frame
+            // 何か伸ばさないと影やフレームがなくなる
             (*params).rgrc[0].top += 1;
-            (*params).rgrc[0].bottom += 1;
+            // (*params).rgrc[0].left += 1;
+            // (*params).rgrc[0].right += 1;
+            // (*params).rgrc[0].bottom += 1;
         }
 
         return 0;
