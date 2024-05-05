@@ -5,47 +5,29 @@ use std::{
     pin::Pin,
 };
 
-use raqote::
-    DrawTarget;
-use windows::
-    Win32::{
-        Foundation::{HWND, TRUE},
-        Graphics::Dwm::DwmIsCompositionEnabled,
-        UI::WindowsAndMessaging::{
-            GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_STYLE, SWP_FRAMECHANGED, WS_SYSMENU,
-        },
-    }
-;
-use windows_sys::Win32::{
-    Graphics::
-        Dwm::DwmExtendFrameIntoClientArea,
-
-    UI::{
-        Controls::
-            MARGINS,
-
-        Shell::SetWindowSubclass,
-        WindowsAndMessaging::IsZoomed,
+use raqote::DrawTarget;
+use windows::Win32::{
+    Foundation::{HWND, TRUE},
+    Graphics::Dwm::DwmIsCompositionEnabled,
+    UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_STYLE, SWP_FRAMECHANGED, WS_SYSMENU,
     },
 };
-use winit::{
-    dpi::PhysicalSize,
-    event_loop::ActiveEventLoop,
-    window::Window,
+use windows_sys::Win32::{
+    Graphics::Dwm::DwmExtendFrameIntoClientArea,
+    UI::{Controls::MARGINS, Shell::SetWindowSubclass, WindowsAndMessaging::IsZoomed},
 };
+use winit::{dpi::PhysicalSize, event_loop::ActiveEventLoop, window::Window};
 
 use crate::{
-    setting::{
-        window::{
-            control_box::{CaptionDirection, ControlBoxPositionAxis, ControlBoxSetting},
-            PinnedWindowSetting,
-        },
-        SettingContext,
+    setting::window::{
+        control_box::{CaptionDirection, ControlBoxPositionAxis, ControlBoxSetting},
+        PinnedWindowSetting,
     },
-    window::{
-        get_caption_button_rect, wrapper_subclass_prop, UIDSUBCLASS,
-    },
+    SettingContext,
 };
+
+use super::{get_caption_button_rect, wrapper_subclass_prop, UIDSUBCLASS};
 
 pub struct WindowWrapper {
     pub window: Window,
@@ -223,38 +205,21 @@ impl WindowWrapper {
         }
     }
 
-    pub fn paint(&self) {
-        use raqote::*;
-
-        // println!("paint start");
-
-        let context = softbuffer::Context::new(&self.window).unwrap();
-
+    pub fn paint_before(&self) -> DrawTarget {
         let width = self.window.inner_size().width;
         let height = self.window.inner_size().height;
         // println!("width: {}, height: {}", width, height);
-        let mut dt = DrawTarget::new(width as i32, height as i32);
+        let dt = DrawTarget::new(width as i32, height as i32);
 
-        let mut pb = PathBuilder::new();
-        pb.move_to(0., 0.);
-        pb.line_to(width as f32, height as f32);
-        pb.line_to(width as f32, 0.);
-        pb.close();
-        let path = pb.finish();
+        dt
+    }
 
-        dt.fill(
-            &path,
-            &Source::Solid(SolidSource {
-                r: 0x0,
-                g: 0x0,
-                b: 0x80,
-                a: 0x80,
-            }),
-            &DrawOptions::new(),
-        );
-
+    pub fn paint_close(&self, mut dt: DrawTarget) {
         self.paint_control_box(self.window.inner_size(), &mut dt);
 
+        let width = dt.width() as u32;
+        let height = dt.height() as u32;
+        let context = softbuffer::Context::new(&self.window).unwrap();
         let mut surface = softbuffer::Surface::new(&context, &self.window).unwrap();
         surface
             .resize(width.try_into().unwrap(), height.try_into().unwrap())

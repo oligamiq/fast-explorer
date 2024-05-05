@@ -1,23 +1,20 @@
 use std::collections::HashMap;
 
-
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{
     GlobalHotKeyEvent, GlobalHotKeyEventReceiver, GlobalHotKeyManager, HotKeyState,
 };
 
-
 use setting::SettingContext;
 
-
-
+use crate::window::backend::window::WindowWrapper;
+use window::paint::traits::WindowPainter as _;
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, DeviceId, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::window::WindowId;
 
 mod window;
-use window::WindowWrapper;
 
 mod setting;
 
@@ -101,7 +98,7 @@ impl ApplicationHandler for State {
                     println!("Window destroyed");
                     return;
                 }
-                WindowEvent::Focused(focus) => {
+                WindowEvent::Focused(_focus) => {
                     // println!("Window focused: {focus}");
                 }
                 _ => {}
@@ -113,7 +110,9 @@ impl ApplicationHandler for State {
                     WindowEvent::RedrawRequested => {
                         // println!("Redraw requested");
                         //
-                        window.paint();
+                        let mut dt = window.paint_before();
+                        self.paint(&mut dt);
+                        window.paint_close(dt);
                     }
                     WindowEvent::CloseRequested => {
                         println!("Close requested");
