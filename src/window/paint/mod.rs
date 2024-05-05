@@ -27,5 +27,23 @@ impl WindowPainter for State {
             &Source::Solid(color.into()),
             &DrawOptions::new(),
         );
+
+        let mut pb = PathBuilder::new();
+        pb.move_to(0., 0.);
+        pb.line_to(width as f32, height as f32);
+        pb.line_to(0., height as f32);
+        pb.close();
+        let path = pb.finish();
+
+        dt.fill(
+            &path,
+            &Source::Solid(SolidSource {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 0,
+            }),
+            &DrawOptions::new(),
+        );
     }
 }

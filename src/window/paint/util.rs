@@ -7,6 +7,8 @@ pub fn get_accent_color() -> Color {
 
     unsafe { DwmGetColorizationColor(&mut color, &mut opaque) }.unwrap();
 
+    // println!("opaque: {:?}", opaque);
+
     // 0xAARRGGBB
     return Color::new(
         ((color >> 24) & 0xFF) as u8,
