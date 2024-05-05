@@ -5,6 +5,7 @@ use crate::State;
 use self::{traits::WindowPainter, util::get_accent_color};
 use raqote::*;
 
+pub mod color_palette;
 pub mod traits;
 pub mod util;
 
@@ -22,11 +23,7 @@ impl WindowPainter for State {
         pb.close();
         let path = pb.finish();
 
-        dt.fill(
-            &path,
-            &Source::Solid(color.into()),
-            &DrawOptions::new(),
-        );
+        dt.fill(&path, &Source::Solid(color.into()), &DrawOptions::new());
 
         let mut pb = PathBuilder::new();
         pb.move_to(0., 0.);

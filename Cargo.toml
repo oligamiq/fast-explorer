@@ -7,6 +7,7 @@ edition = "2021"
 cosmic-text = "0.11.2"
 global-hotkey = "0.5"
 image = "0.25"
+palette = { version = "0.7.6", default-features = false, features = ["std", "alloc"] }
 parking_lot = { version = "0.12", features = ["arc_lock"] }
 raqote = { version = "0.8.4", default-features = false, features = ["text", "png"] }
 softbuffer = "0.4.2"
