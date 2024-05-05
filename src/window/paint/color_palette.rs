@@ -110,6 +110,9 @@ pub fn color_palette_test() {
     let colors = color_palette(Color::new(0x00, 46, 118, 214));
     println!("{:#x?}", colors);
 
+    let colors = color_palette(Color::new(0x00, 0, 139, 0));
+    println!("{:#x?}", colors);
+
     // to hsv and print
     // no rust fmt
     #[rustfmt::skip]
