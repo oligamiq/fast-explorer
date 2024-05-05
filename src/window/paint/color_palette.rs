@@ -18,9 +18,11 @@ pub fn color_palette(color: Color) -> SystemAccentColors {
         green: color.g(),
         blue: color.b(),
     } .into();
+    println!("{:#x?}", color_hsv);
     let light = lighter(&color_hsv, &color_hsv);
     let lighter_ = lighter(&light, &color_hsv);
     let lightest = lighter(&lighter_, &color_hsv);
+    let accent = color_hsv;
     let dark = darker(&color_hsv, &color_hsv);
     let darker_ = darker(&dark, &color_hsv);
     let darkest = darker(&darker_, &color_hsv);
@@ -28,6 +30,7 @@ pub fn color_palette(color: Color) -> SystemAccentColors {
     let light3: Rgb = lightest.into();
     let light2: Rgb = lighter_.into();
     let light1: Rgb = light.into();
+    let accent: Rgb = accent.into();
     let dark1: Rgb = dark.into();
     let dark2: Rgb = darker_.into();
     let dark3: Rgb = darkest.into();
@@ -36,7 +39,7 @@ pub fn color_palette(color: Color) -> SystemAccentColors {
         light3: Color::new(color.a(), light3.red, light3.green, light3.blue),
         light2: Color::new(color.a(), light2.red, light2.green, light2.blue),
         light1: Color::new(color.a(), light1.red, light1.green, light1.blue),
-        accent: color,
+        accent: Color::new(color.a(), accent.red, accent.green, accent.blue),
         dark1: Color::new(color.a(), dark1.red, dark1.green, dark1.blue),
         dark2: Color::new(color.a(), dark2.red, dark2.green, dark2.blue),
         dark3: Color::new(color.a(), dark3.red, dark3.green, dark3.blue),
@@ -61,12 +64,12 @@ fn lighter(prev: &Hsl, base: &Hsl) -> Hsl {
     // https://learn.microsoft.com/windows-hardware/customize/desktop/unattend/microsoft-windows-shell-setup-themes-windowcolor
     // Shade: 25% of V
     // If V >= 70%, reduce sat to 75% rel
-    let v_step = base.value / 6;
+    let v_step = base.lightness / 6;
 
-    result.value = min(prev.value + v_step, RANGE);
-    if result.value >= 0x6000 {
-        result.saturation = (prev.saturation * 192) >> 8;
-    };
+    result.lightness = min(prev.lightness + v_step, 255);
+    if base.lightness >= SL_RANGE * 75 / 100 {
+        result.saturation = (result.saturation * 75) / 100;
+    }
 
     result
 }
@@ -76,7 +79,7 @@ fn darker(prev: &Hsl, base: &Hsl) -> Hsl {
     let mut result = prev.clone();
 
     // Shade: 25% of V
-    let v_step = base.value / 6;
+    let v_step = base.lightness / 5;
 
     // 0x8B / 1.2 = 0x73
     // 0x8B / 6 * (6 - 1) = 0x73
@@ -106,7 +109,7 @@ fn darker(prev: &Hsl, base: &Hsl) -> Hsl {
     // 0x30 / 0x8B = 0.345
 
 
-    result.value = max(prev.value - v_step, 0x0000);
+    result.lightness = max(prev.lightness - v_step, 0x0000);
 
     result
 }
@@ -166,8 +169,8 @@ pub struct Rgb {
     pub blue: u8,
 }
 
-const RANGE: i32 = 255;
-const RANGE2: i32 = 255;
+const H_RANGE: i32 = 360;
+const SL_RANGE: i32 = 0x8000;
 
 impl Into<Hsl> for Rgb {
     fn into(self) -> Hsl {
@@ -177,35 +180,33 @@ impl Into<Hsl> for Rgb {
             lightness: 0,
         };
 
-        // Compute color as HSL. Use range [0..RANGE]
-        let r = self.red as i32 * RANGE / 255;
-        let g = self.green as i32 * RANGE / 255;
-        let b = self.blue as i32 * RANGE / 255;
+        // Compute color as HSL. Use range [0..H_RANGE]
+        let r = self.red as i32;
+        let g = self.green as i32;
+        let b = self.blue as i32;
 
         let max = max(r, max(g, b));
         let min = min(r, min(g, b));
         let diff = max - min;
         if diff != 0 {
             if max == r {
-                result.hue = ((g - b) * RANGE) / diff;
+                result.hue = ((g - b) * (H_RANGE / 6)) / diff;
             } else if max == g {
-                result.hue = (((b - r) * RANGE) / diff) + 2 * RANGE;
+                result.hue = (((b - r) * (H_RANGE / 6)) / diff) + 2 * (H_RANGE / 6);
             } else {
-                result.hue = (((r - g) * RANGE) / diff) + 4 * RANGE;
+                result.hue = (((r - g) * (H_RANGE / 6)) / diff) + 4 * (H_RANGE / 6);
             }
         }
         if result.hue < 0 {
-            result.hue += 6 * RANGE;
+            result.hue += 6 * (H_RANGE / 6);
         }
         let cnt = (max + min) / 2;
-        if cnt <= RANGE2 / 2 {
-            result.saturation = diff / (max + min);
+        if cnt < 128 {
+            result.saturation = diff * SL_RANGE / (max + min);
         } else {
-            result.saturation = diff / (2 * RANGE2 - max - min);
+            result.saturation = diff * SL_RANGE / (2 * 255 - max - min);
         }
-        result.lightness = max;
-        if result.lightness != 0 {
-        }
+        result.lightness = cnt;
 
         result
     }
@@ -216,46 +217,46 @@ impl Into<Rgb> for Hsl {
         let r;
         let g;
         let b;
-        let chroma = (self.value * self.saturation) / RANGE;
-        let second = chroma * (RANGE - ((self.hue % (2 * RANGE)) - RANGE).abs()) / RANGE;
-        match self.hue / RANGE {
+        let chroma = ((SL_RANGE - (2 * self.lightness - SL_RANGE).abs()) * self.saturation) / SL_RANGE;
+        let h = self.hue / (H_RANGE / 6);
+        match h {
             0 => {
                 r = chroma;
-                g = second;
+                g = 0;
                 b = 0;
             }
             1 => {
-                r = second;
+                r = chroma;
                 g = chroma;
                 b = 0;
             }
             2 => {
                 r = 0;
                 g = chroma;
-                b = second;
+                b = 0;
             }
             3 => {
                 r = 0;
-                g = second;
+                g = chroma;
                 b = chroma;
             }
             4 => {
-                r = second;
+                r = 0;
                 g = 0;
                 b = chroma;
             }
             5 => {
                 r = chroma;
                 g = 0;
-                b = second;
+                b = chroma;
             }
             _ => unreachable!(),
         }
-        let min_ = self.value - chroma;
+        let min_ = self.lightness - chroma / 2;
         return Rgb {
-            red: min(((r + min_) * 255) / RANGE, 255) as u8,
-            green: min(((g + min_) * 255) / RANGE, 255) as u8,
-            blue: min(((b + min_) * 255) / RANGE, 255) as u8,
+            red: min(r + min_, 255) as u8,
+            green: min(g + min_, 255) as u8,
+            blue: min(b + min_, 255) as u8,
         };
     }
 }
