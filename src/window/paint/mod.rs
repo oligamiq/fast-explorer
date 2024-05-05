@@ -4,6 +4,7 @@ use crate::State;
 
 use self::{traits::WindowPainter, util::get_accent_color};
 use raqote::*;
+use crate::window::paint::color_palette::color_palette;
 
 pub mod color_palette;
 pub mod traits;
@@ -15,6 +16,15 @@ impl WindowPainter for State {
         let height = dt.height();
 
         let color = get_accent_color();
+
+        // let colors = color_palette(Color::new(0x00, 46, 118, 214));
+        // println!("{:#x?}", colors);
+
+        let colors = color_palette(Color::new(0x00, 0, 0x8B, 0));
+        println!("{:#x?}", colors);
+
+        let colors = color_palette(Color::new(0x00, 0, 0x7f, 0));
+        println!("{:#x?}", colors);
 
         let mut pb = PathBuilder::new();
         pb.move_to(0., 0.);

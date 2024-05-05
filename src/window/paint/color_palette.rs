@@ -13,7 +13,7 @@ use raqote::Color;
 
 // https://github.com/res2k/Windows10Colors/blob/master/Windows10Colors/Windows10Colors.cpp#L466
 pub fn color_palette(color: Color) -> SystemAccentColors {
-    let color_hsv: Hsv = Rgb {
+    let color_hsv: Hsl = Rgb {
         red: color.r(),
         green: color.g(),
         blue: color.b(),
@@ -55,13 +55,13 @@ pub struct SystemAccentColors {
 }
 
 // https://github.com/res2k/Windows10Colors/blob/master/Windows10Colors/Windows10Colors.cpp#L396
-fn lighter(prev: &Hsv, base: &Hsv) -> Hsv {
+fn lighter(prev: &Hsl, base: &Hsl) -> Hsl {
     let mut result = prev.clone();
 
     // https://learn.microsoft.com/windows-hardware/customize/desktop/unattend/microsoft-windows-shell-setup-themes-windowcolor
     // Shade: 25% of V
     // If V >= 70%, reduce sat to 75% rel
-    let v_step = base.value / 4;
+    let v_step = base.value / 6;
 
     result.value = min(prev.value + v_step, 0x8000);
     if result.value >= 0x6000 {
@@ -72,11 +72,37 @@ fn lighter(prev: &Hsv, base: &Hsv) -> Hsv {
 }
 
 // https://github.com/res2k/Windows10Colors/blob/master/Windows10Colors/Windows10Colors.cpp#L409
-fn darker(prev: &Hsv, base: &Hsv) -> Hsv {
+fn darker(prev: &Hsl, base: &Hsl) -> Hsl {
     let mut result = prev.clone();
 
     // Shade: 25% of V
-    let v_step = base.value / 4;
+    let v_step = base.value / 6;
+
+    // 0x8B / 1.2 = 0x73
+    // 0x8B / 6 * (6 - 1) = 0x73
+    // 0x8B - (0x8B / 6) = 0x73
+
+    // 0x73 / 1.36 = 0x54
+
+    // 0x92 -> 0x7a -> 0x5b -> 0x38
+    // 0x8B -> 0x73 -> 0x54 -> 0x30
+    // 0x7f -> 0x66 -> 0x4c -> 0x28
+
+    // 0x8B / 0x73 = 1.21
+    // 0x73 / 0x8B = 0.83
+    // 0x7f / 0x66 = 1.245
+    // 0x66 / 0x7f = 0.80
+
+    // 0x73 / 0x54 = 1.36
+    // 0x54 / 0x73 = 0.73
+    // 0x8B / 0x54 = 1.655
+    // 0x54 / 0x8B = 0.60
+
+    // 0x54 / 0x30 = 1.75
+    // 0x30 / 0x54 = 0.57
+    // 0x8B / 0x30 = 2.9
+    // 0x30 / 0x8B = 0.345
+
 
     result.value = max(prev.value - v_step, 0x0000);
 
@@ -96,7 +122,7 @@ pub fn color_palette_test() {
     let colors = color_palette(Color::new(0x00, 46, 118, 214));
     println!("{:#x?}", colors);
 
-    let colors = color_palette(Color::new(0x00, 0, 139, 0));
+    let colors = color_palette(Color::new(0x00, 0, 0x8B, 0));
     println!("{:#x?}", colors);
 
     // to hsv and print
@@ -113,13 +139,19 @@ pub fn color_palette_test() {
             (111, 3, 6), (158, 9, 18), (210, 14, 30), (232, 17, 35), (239, 39, 51), (244, 103, 98), (251, 157, 139)
         ],
         vec![
-            (0, 48, 0), (0, 84, 0), (0, 115, 0), (0, 139, 0), (5, 181, 0), (63, 255, 33), (126, 255, 95)
+            (0, 0x38, 0), (0, 0x5b, 0), (0, 0x7a, 0), (0, 0x92, 0), (0x05, 0xaf, 0), (0x17, 0xfd, 0), (0x44, 0xff,0x2a)
+        ],
+        vec![
+            (0, 0x30, 0), (0, 0x54, 0), (0, 0x73, 0), (0, 0x8B, 0), (0x05, 0xB5, 0), (0x3F, 0xFF, 0x21), (0x7E, 0xFF, 0x5F)
+        ],
+        vec![
+            (0, 0x28, 0), (0, 0x4c, 0), (0, 0x66, 0), (0, 0x7f, 0), (0, 0x99, 0), (0, 0xb2, 0), (0, 0xd6, 0)
         ]
     ];
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct Hsv {
+pub struct Hsl {
     pub hue: i32,
     pub saturation: i32,
     pub value: i32,
@@ -132,9 +164,9 @@ pub struct Rgb {
     pub blue: u8,
 }
 
-impl Into<Hsv> for Rgb {
-    fn into(self) -> Hsv {
-        let mut result = Hsv {
+impl Into<Hsl> for Rgb {
+    fn into(self) -> Hsl {
+        let mut result = Hsl {
             hue: 0,
             saturation: 0,
             value: 0,
@@ -169,7 +201,7 @@ impl Into<Hsv> for Rgb {
     }
 }
 
-impl Into<Rgb> for Hsv {
+impl Into<Rgb> for Hsl {
     fn into(self) -> Rgb {
         let r;
         let g;
