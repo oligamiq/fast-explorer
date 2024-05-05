@@ -63,7 +63,7 @@ fn lighter(prev: &Hsl, base: &Hsl) -> Hsl {
     // If V >= 70%, reduce sat to 75% rel
     let v_step = base.value / 6;
 
-    result.value = min(prev.value + v_step, 0x8000);
+    result.value = min(prev.value + v_step, RANGE);
     if result.value >= 0x6000 {
         result.saturation = (prev.saturation * 192) >> 8;
     };
@@ -92,6 +92,8 @@ fn darker(prev: &Hsl, base: &Hsl) -> Hsl {
     // 0x73 / 0x8B = 0.83
     // 0x7f / 0x66 = 1.245
     // 0x66 / 0x7f = 0.80
+    // 0x92 / 0x7a = 1.20
+    // 0x7a / 0x92 = 0.835
 
     // 0x73 / 0x54 = 1.36
     // 0x54 / 0x73 = 0.73
@@ -154,7 +156,7 @@ pub fn color_palette_test() {
 pub struct Hsl {
     pub hue: i32,
     pub saturation: i32,
-    pub value: i32,
+    pub lightness: i32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -164,37 +166,45 @@ pub struct Rgb {
     pub blue: u8,
 }
 
+const RANGE: i32 = 255;
+const RANGE2: i32 = 255;
+
 impl Into<Hsl> for Rgb {
     fn into(self) -> Hsl {
         let mut result = Hsl {
             hue: 0,
             saturation: 0,
-            value: 0,
+            lightness: 0,
         };
 
-        // Compute color as HSV. Use range [0..0x8000]
-        let r = self.red as i32 * 0x8000 / 255;
-        let g = self.green as i32 * 0x8000 / 255;
-        let b = self.blue as i32 * 0x8000 / 255;
+        // Compute color as HSL. Use range [0..RANGE]
+        let r = self.red as i32 * RANGE / 255;
+        let g = self.green as i32 * RANGE / 255;
+        let b = self.blue as i32 * RANGE / 255;
 
         let max = max(r, max(g, b));
         let min = min(r, min(g, b));
         let diff = max - min;
         if diff != 0 {
             if max == r {
-                result.hue = ((g - b) * 0x8000) / diff;
-                if result.hue < 0 {
-                    result.hue += 6 * 0x8000;
-                }
+                result.hue = ((g - b) * RANGE) / diff;
             } else if max == g {
-                result.hue = (((b - r) * 0x8000) / diff) + 2 * 0x8000;
+                result.hue = (((b - r) * RANGE) / diff) + 2 * RANGE;
             } else {
-                result.hue = (((r - g) * 0x8000) / diff) + 4 * 0x8000;
+                result.hue = (((r - g) * RANGE) / diff) + 4 * RANGE;
             }
         }
-        result.value = max;
-        if result.value != 0 {
-            result.saturation = (diff * 0x8000) / result.value
+        if result.hue < 0 {
+            result.hue += 6 * RANGE;
+        }
+        let cnt = (max + min) / 2;
+        if cnt <= RANGE2 / 2 {
+            result.saturation = diff / (max + min);
+        } else {
+            result.saturation = diff / (2 * RANGE2 - max - min);
+        }
+        result.lightness = max;
+        if result.lightness != 0 {
         }
 
         result
@@ -206,9 +216,9 @@ impl Into<Rgb> for Hsl {
         let r;
         let g;
         let b;
-        let chroma = (self.value * self.saturation) / 0x8000;
-        let second = chroma * (0x8000 - ((self.hue % (2 * 0x8000)) - 0x8000).abs()) / 0x8000;
-        match self.hue / 0x8000 {
+        let chroma = (self.value * self.saturation) / RANGE;
+        let second = chroma * (RANGE - ((self.hue % (2 * RANGE)) - RANGE).abs()) / RANGE;
+        match self.hue / RANGE {
             0 => {
                 r = chroma;
                 g = second;
@@ -243,9 +253,9 @@ impl Into<Rgb> for Hsl {
         }
         let min_ = self.value - chroma;
         return Rgb {
-            red: min(((r + min_) * 255) / 0x8000, 255) as u8,
-            green: min(((g + min_) * 255) / 0x8000, 255) as u8,
-            blue: min(((b + min_) * 255) / 0x8000, 255) as u8,
+            red: min(((r + min_) * 255) / RANGE, 255) as u8,
+            green: min(((g + min_) * 255) / RANGE, 255) as u8,
+            blue: min(((b + min_) * 255) / RANGE, 255) as u8,
         };
     }
 }
