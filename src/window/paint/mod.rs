@@ -24,12 +24,7 @@ impl WindowPainter for State {
 
         dt.fill(
             &path,
-            &Source::Solid(SolidSource {
-                r: 0x0,
-                g: 0x0,
-                b: 0x80,
-                a: 0x80,
-            }),
+            &Source::Solid(color.into()),
             &DrawOptions::new(),
         );
     }
