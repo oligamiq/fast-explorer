@@ -1,5 +1,6 @@
 use std::cmp::{max, min};
 
+use palette::IntoColor;
 use raqote::Color;
 
 // https://learn.microsoft.com/ja-jp/windows/apps/design/style/color
@@ -17,7 +18,8 @@ pub fn color_palette(color: Color) -> SystemAccentColors {
         red: color.r(),
         green: color.g(),
         blue: color.b(),
-    } .into();
+    }
+    .into();
     println!("{:#x?}", color_hsv);
     let light = lighter(&color_hsv, &color_hsv);
     let lighter_ = lighter(&light, &color_hsv);
@@ -26,6 +28,14 @@ pub fn color_palette(color: Color) -> SystemAccentColors {
     let dark = darker(&color_hsv, &color_hsv);
     let darker_ = darker(&dark, &color_hsv);
     let darkest = darker(&darker_, &color_hsv);
+
+    println!("lightest: {}", lightest.print());
+    println!("lighter : {}", lighter_.print());
+    println!("light   : {}", light.print());
+    println!("accent  : {}", accent.print());
+    println!("dark    : {}", dark.print());
+    println!("darker  : {}", darker_.print());
+    println!("darkest : {}", darkest.print());
 
     let light3: Rgb = lightest.into();
     let light2: Rgb = lighter_.into();
@@ -108,10 +118,72 @@ fn darker(prev: &Hsl, base: &Hsl) -> Hsl {
     // 0x8B / 0x30 = 2.9
     // 0x30 / 0x8B = 0.345
 
-
     result.lightness = max(prev.lightness - v_step, 0x0000);
 
     result
+}
+
+// 0xeaeaea hsl(0, 0%, 92%) 234 9176
+// 0xd8d8d8 hsl(0, 0%, 85%) 216 8470
+// 0xcccccc hsl(0, 0%, 80%) 204 8000
+// 0xbfbfbf hsl(0, 0%, 75%) 191 7490
+// 0xb2b2b2 hsl(0, 0%, 70%) 178 6980
+// 0xa5a5a5 hsl(0, 0%, 65%) 165 6470
+// 0x939393 hsl(0, 0%, 58%) 147 5764
+
+// 0xc0c0c0 hsl(0, 0%, 75%)
+// 0xb5b5b5 hsl(0, 0%, 71%)
+// 0xadadad hsl(0, 0%, 68%)
+// 0xa6a6a6 hsl(0, 0%, 65%)
+// 0x9e9e9e hsl(0, 0%, 62%)
+// 0x969696 hsl(0, 0%, 59%)
+// 0x8b8b8b hsl(0, 0%, 55%)
+
+// 0x747474 hsl(0, 0%, 45%)
+// 0x6b6b6b hsl(0, 0%, 42%)
+// 0x646464 hsl(0, 0%, 39%)
+// 0x5e5e5e hsl(0, 0%, 37%)
+// 0x575757 hsl(0, 0%, 34%)
+// 0x505050 hsl(0, 0%, 31%)
+// 0x474747 hsl(0, 0%, 28%)
+
+#[test]
+pub fn print_hsl() {
+    let r = vec![
+        get_hsl(0xeaeaea),
+        get_hsl(0xd8d8d8),
+        get_hsl(0xcccccc),
+        get_hsl(0xbfbfbf),
+        get_hsl(0xb2b2b2),
+        get_hsl(0xa5a5a5),
+        get_hsl(0x939393),
+        get_hsl(0xc0c0c0),
+        get_hsl(0xb5b5b5),
+        get_hsl(0xadadad),
+        get_hsl(0xa6a6a6),
+        get_hsl(0x9e9e9e),
+        get_hsl(0x969696),
+        get_hsl(0x8b8b8b),
+        get_hsl(0x747474),
+        get_hsl(0x6b6b6b),
+        get_hsl(0x646464),
+        get_hsl(0x5e5e5e),
+        get_hsl(0x575757),
+        get_hsl(0x505050),
+        get_hsl(0x474747),
+    ];
+    for i in r {
+        println!("{:?}", i);
+    }
+}
+
+pub fn get_hsl(color: u32) -> palette::Hsl {
+    let rgb: palette::rgb::Rgb = palette::Srgb::new(
+        (color >> 16) as u8,
+        (color >> 8) as u8,
+        color as u8).into_format();
+    let hsl: palette::Hsl = rgb.into_color();
+    return hsl;
 }
 
 // add8ff
@@ -162,6 +234,17 @@ pub struct Hsl {
     pub lightness: i32,
 }
 
+impl Hsl {
+    pub fn print(&self) -> String {
+        format!(
+            "{:#?} {:#?}% {:#?}%",
+            self.hue * 360 / H_RANGE,
+            self.saturation * 100 / SL_RANGE,
+            self.lightness * 100 / SL_RANGE
+        )
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Rgb {
     pub red: u8,
@@ -169,8 +252,8 @@ pub struct Rgb {
     pub blue: u8,
 }
 
-const H_RANGE: i32 = 360;
-const SL_RANGE: i32 = 0x8000;
+const H_RANGE: i32 = 255;
+const SL_RANGE: i32 = 255;
 
 impl Into<Hsl> for Rgb {
     fn into(self) -> Hsl {
@@ -217,7 +300,8 @@ impl Into<Rgb> for Hsl {
         let r;
         let g;
         let b;
-        let chroma = ((SL_RANGE - (2 * self.lightness - SL_RANGE).abs()) * self.saturation) / SL_RANGE;
+        let chroma =
+            ((SL_RANGE - (2 * self.lightness - SL_RANGE).abs()) * self.saturation) / SL_RANGE;
         let h = self.hue / (H_RANGE / 6);
         match h {
             0 => {
