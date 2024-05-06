@@ -9,6 +9,8 @@ pub struct ControlBoxSetting {
     pub close_button: bool,
     pub position_x: ControlBoxPositionAxis,
     pub position_y: ControlBoxPositionAxis,
+    pub close_btn_color: u32,
+    pub btn_color_change_rate: u8, // maxが10秒
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -30,6 +32,8 @@ impl Default for ControlBoxSetting {
             close_button: true,
             position_x: ControlBoxPositionAxis::Last,
             position_y: ControlBoxPositionAxis::Center { margin: 0 },
+            close_btn_color: 0xe81123,
+            btn_color_change_rate: 0x10,
         }
     }
 }

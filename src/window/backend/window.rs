@@ -32,6 +32,7 @@ use super::{get_caption_button_rect, wrapper_subclass_prop, UIDSUBCLASS};
 pub struct WindowWrapper {
     pub window: Window,
     pub setting: Pin<Box<PinnedWindowSetting>>,
+    pub color_change_count: u8,
 }
 
 impl WindowWrapper {
@@ -81,6 +82,7 @@ impl WindowWrapper {
         let ret = Self {
             window,
             setting: pinned_setting,
+            color_change_count: 0,
         };
 
         unsafe {

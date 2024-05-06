@@ -1,3 +1,6 @@
+use core::fmt;
+use std::fmt::{Display, Formatter};
+
 use raqote::Color;
 use windows::{Win32::{Foundation::FALSE, Graphics::Dwm::DwmGetColorizationColor}, UI::ViewManagement::{UIColorType, UISettings}};
 
@@ -49,6 +52,37 @@ pub fn get_accent_colors() -> SystemAccentColors {
         accent_light2: ui_settings.GetColorValue(UIColorType::AccentLight2).unwrap_or_default().to_raqote_color(),
         accent_light3: ui_settings.GetColorValue(UIColorType::AccentLight3).unwrap_or_default().to_raqote_color(),
         complement: ui_settings.GetColorValue(UIColorType::Complement).unwrap_or_default().to_raqote_color(),
+    }
+}
+
+impl Display for SystemAccentColors {
+
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        use colored::Colorize;
+
+        let colors = vec![
+            self.background,
+            self.foreground,
+            self.accent_dark3,
+            self.accent_dark2,
+            self.accent_dark1,
+            self.accent,
+            self.accent_light1,
+            self.accent_light2,
+            self.accent_light3,
+            self.complement,
+        ].into_iter().map(|c| {
+            (c, colored::Color::TrueColor {
+                r: c.r(),
+                g: c.g(),
+                b: c.b(),
+            })
+        }).map(|(c, f)| {
+            format!("{:x?}", c).color(f)
+        }).collect::<Vec<_>>();
+
+        // write!(f, "SystemAccentColors {{\n  background: {:?},\n  foreground: {:?},\n  accent_dark3: {:?},\n  accent_dark2: {:?},\n  accent_dark1: {:?},\n  accent: {:?},\n  accent_light1: {:?},\n  accent_light2: {:?},\n  accent_light3: {:?},\n  complement: {:?},\n}}", format!("{:x?}", self.background).color(self.background), self.foreground, self.accent_dark3, self.accent_dark2, self.accent_dark1, self.accent, self.accent_light1, self.accent_light2, self.accent_light3, self.complement)
+        write!(f, "SystemAccentColors {{\n  background: {},\n  foreground: {},\n  accent_dark3: {},\n  accent_dark2: {},\n  accent_dark1: {},\n  accent: {},\n  accent_light1: {},\n  accent_light2: {},\n  accent_light3: {},\n  complement: {},\n}}", colors[0], colors[1], colors[2], colors[3], colors[4], colors[5], colors[6], colors[7], colors[8], colors[9])
     }
 }
 

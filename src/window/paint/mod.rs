@@ -15,7 +15,7 @@ impl WindowPainter for State {
 
         let color = get_accent_colors();
 
-        println!("{:#x?}", color);
+        println!("{:#}", color);
 
         let mut pb = PathBuilder::new();
         pb.move_to(0., 0.);
