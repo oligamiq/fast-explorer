@@ -184,23 +184,13 @@ unsafe extern "system" fn wrapper_subclass_prop(
         };
 
         // Get the window rectangle.
-        let mut rc_window = RECT {
-            left: 0,
-            top: 0,
-            right: 0,
-            bottom: 0,
-        };
+        let mut rc_window: RECT = std::mem::zeroed();
         unsafe { GetWindowRect(hwnd, &mut rc_window) };
 
         if unsafe { IsZoomed(hwnd) } != 0 {
             let monitor = unsafe {
                 MonitorFromRect(
-                    &RECT {
-                        left: 0,
-                        top: 0,
-                        right: 0,
-                        bottom: 0,
-                    },
+                    &std::mem::zeroed(),
                     MONITOR_DEFAULTTONULL,
                 )
             };
@@ -275,24 +265,14 @@ fn hit_test_nca(hwnd: HWND, _w_param: WPARAM, l_param: LPARAM, setting: &WindowS
     };
 
     // Get the window rectangle.
-    let mut rc_window = RECT {
-        left: 0,
-        top: 0,
-        right: 0,
-        bottom: 0,
-    };
+    let mut rc_window: RECT = unsafe { std::mem::zeroed() };
     unsafe { GetWindowRect(hwnd, &mut rc_window) };
 
     let is_zoomed = unsafe { IsZoomed(hwnd) } != 0;
     if is_zoomed {
         let monitor = unsafe {
             MonitorFromRect(
-                &RECT {
-                    left: 0,
-                    top: 0,
-                    right: 0,
-                    bottom: 0,
-                },
+                &std::mem::zeroed(),
                 MONITOR_DEFAULTTONULL,
             )
         };
@@ -612,12 +592,7 @@ pub fn show_context_menu(lparam: LPARAM, hwnd: HWND) -> LRESULT {
 /// get DWMWA_CAPTION_BUTTON_BOUNDS
 #[allow(dead_code)]
 pub unsafe fn get_caption_button_rect(hwnd: HWND) -> RECT {
-    let mut bounds = RECT {
-        left: 0,
-        top: 0,
-        right: 0,
-        bottom: 0,
-    };
+    let mut bounds: RECT = std::mem::zeroed();
     let hr = DwmGetWindowAttribute(
         hwnd,
         DWMWA_CAPTION_BUTTON_BOUNDS as u32,
@@ -654,12 +629,7 @@ pub unsafe fn set_caption_button_rect(hwnd: HWND, bounds: RECT) {
 /// get  DWMWA_EXTENDED_FRAME_BOUNDS
 #[allow(dead_code)]
 pub unsafe fn get_extended_frame_bounds(hwnd: HWND) -> RECT {
-    let mut bounds = RECT {
-        left: 0,
-        top: 0,
-        right: 0,
-        bottom: 0,
-    };
+    let mut bounds: RECT = std::mem::zeroed();
     let hr = DwmGetWindowAttribute(
         hwnd,
         windows_sys::Win32::Graphics::Dwm::DWMWA_EXTENDED_FRAME_BOUNDS as u32,

@@ -7,12 +7,12 @@ edition = "2021"
 cosmic-text = "0.11.2"
 global-hotkey = "0.5"
 image = "0.25"
-palette = { version = "0.7.6", default-features = false, features = ["std", "alloc"] }
+# palette = { version = "0.7.6", default-features = false, features = ["std", "alloc"] }
 parking_lot = { version = "0.12", features = ["arc_lock"] }
 raqote = { version = "0.8.4", default-features = false, features = ["text", "png"] }
 softbuffer = "0.4.2"
 tray-icon = "0.13"
 winapi = { version = "0.3.9", features = ["windowsx"] }
-windows = { version = "0.56.0", features = ["UI_WindowManagement_Preview", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Dwm", "Win32_Foundation"]}
+windows = { version = "0.56.0", features = ["UI_WindowManagement_Preview", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Dwm", "Win32_Foundation", "UI_ViewManagement"]}
 windows-sys = "0.52.0"
 winit = "0.30"

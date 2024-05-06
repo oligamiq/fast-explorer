@@ -2,10 +2,9 @@ use raqote::DrawTarget;
 
 use crate::State;
 
-use self::{traits::WindowPainter, util::get_accent_color};
+use self::{traits::WindowPainter, util::get_accent_colors};
 use raqote::*;
 
-pub mod color_palette;
 pub mod traits;
 pub mod util;
 
@@ -14,7 +13,9 @@ impl WindowPainter for State {
         let width = dt.width();
         let height = dt.height();
 
-        let color = get_accent_color();
+        let color = get_accent_colors();
+
+        println!("{:#x?}", color);
 
         let mut pb = PathBuilder::new();
         pb.move_to(0., 0.);
@@ -23,7 +24,7 @@ impl WindowPainter for State {
         pb.close();
         let path = pb.finish();
 
-        dt.fill(&path, &Source::Solid(color.into()), &DrawOptions::new());
+        dt.fill(&path, &Source::Solid(color.accent.into()), &DrawOptions::new());
 
         let mut pb = PathBuilder::new();
         pb.move_to(0., 0.);
