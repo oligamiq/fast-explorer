@@ -14,7 +14,6 @@ impl WindowPainter for State {
         let height = dt.height();
 
         let color = get_accent_colors();
-
         println!("{:#}", color);
 
         let mut pb = PathBuilder::new();

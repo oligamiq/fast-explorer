@@ -211,7 +211,16 @@ impl WindowWrapper {
         let width = self.window.inner_size().width;
         let height = self.window.inner_size().height;
         // println!("width: {}, height: {}", width, height);
-        let dt = DrawTarget::new(width as i32, height as i32);
+
+        let context = softbuffer::Context::new(&self.window).unwrap();
+        let mut surface = softbuffer::Surface::new(&context, &self.window).unwrap();
+        surface
+            .resize(width.try_into().unwrap(), height.try_into().unwrap())
+            .unwrap();
+
+        let buff = surface.buffer_mut().unwrap();
+
+        let dt = DrawTarget::from_backing(width as i32, height as i32, buff.to_vec());
 
         dt
     }
