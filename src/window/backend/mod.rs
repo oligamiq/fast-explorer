@@ -38,6 +38,7 @@ use crate::setting::window::{
 
 const UIDSUBCLASS: usize = 0x1599764cf41046de;
 
+// https://learn.microsoft.com/en-us/windows/win32/dwm/customframe
 unsafe extern "system" fn wrapper_subclass_prop(
     hwnd: HWND,
     umsg: u32,
@@ -53,7 +54,7 @@ unsafe extern "system" fn wrapper_subclass_prop(
     let mut l_ret: LRESULT = 0;
 
     // 成功したか
-    // let f_call_dwp = unsafe { DwmDefWindowProc(hwnd, umsg, wparam, lparam, &mut l_ret) == S_OK };
+    // let f_call_dwp = unsafe { windows_sys::Win32::Graphics::Dwm::DwmDefWindowProc(hwnd, umsg, wparam, lparam, &mut l_ret) == windows_sys::Win32::Foundation::S_OK };
     // let f_call_dwp = true;
 
     // println!("f_call_dwp: {}", f_call_dwp);
