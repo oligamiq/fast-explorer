@@ -84,8 +84,20 @@ unsafe extern "system" fn wrapper_subclass_prop(
         (*params).rgrc[0].left += 0;
         (*params).rgrc[0].right += 0;
         (*params).rgrc[0].bottom += 0;
+
+        // このコードを(a)より下に持っていくとリリースビルドでエラーしなくなる
         println!("rgrc[0]: top: {}, left: {}, right: {}, bottom: {}", (*params).rgrc[0].top, (*params).rgrc[0].left, (*params).rgrc[0].right, (*params).rgrc[0].bottom);
-        println!("width: {}, height: {}", (*params).rgrc[0].right - (*params).rgrc[0].left, (*params).rgrc[0].bottom - (*params).rgrc[0].top);
+
+        let right = (*params).rgrc[0].right;
+        let bottom = (*params).rgrc[0].bottom;
+        let left = (*params).rgrc[0].left;
+        let top = (*params).rgrc[0].top;
+        let width = right - left;
+        let height = bottom - top;
+
+        // (a)
+        println!("width: {}, height: {}", width, height);
+        // println!("width: {}, height: {}", (*params).rgrc[0].right - (*params).rgrc[0].left, (*params).rgrc[0].bottom - (*params).rgrc[0].top);
 
         println!("WM_NCCALCSIZE: {}", lparam as isize);
 
