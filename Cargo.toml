@@ -1,0 +1,80 @@
+[package]
+name = "fast-explorer"
+version = "0.1.0"
+edition = "2024"
+description = "FastExplorer - a fast alternative file explorer built with Xilem"
+
+[package.metadata.android]
+package = "dev.oligami.fastexplorer"
+build_targets = ["aarch64-linux-android"]
+apk_name = "fast-explorer"
+resources = "android-res"
+
+[package.metadata.android.sdk]
+min_sdk_version = 30
+target_sdk_version = 35
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.MANAGE_EXTERNAL_STORAGE"
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.INTERNET"
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.ACCESS_NETWORK_STATE"
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.REQUEST_INSTALL_PACKAGES"
+
+[package.metadata.android.application]
+label = "FastExplorer"
+debuggable = true
+theme = "@style/FastExplorerTheme"
+has_code = true
+enable_on_back_invoked_callback = true
+
+[package.metadata.android.application.activity]
+name = "dev.oligami.fastexplorer.FastExplorerActivity"
+config_changes = "orientation|keyboard|keyboardHidden|screenLayout|screenSize|smallestScreenSize"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+httpdate = "1"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+zip = { version = "8.2.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+tokio = { version = "1", features = ["io-util", "net", "time", "sync", "rt", "macros"] }
+tracing = "0.1"
+xilem = "0.4.0"
+
+[patch.crates-io]
+masonry_core = { path = "vendor/masonry_core" }
+winit = { path = "vendor/winit" }
+xilem = { path = "vendor/xilem" }
+masonry = { path = "vendor/masonry" }
+masonry_winit = { path = "vendor/masonry_winit" }
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+trash = "5.2.6"
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.22.4"
+winit = { version = "0.30.13", features = ["android-game-activity"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+libloading = "0.8.9"
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_LibraryLoader", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+
+[[example]]
+name = "fast_explorer_android"
+path = "src/main.rs"
+crate-type = ["cdylib"]
+
+# Keep debug builds debuggable while making UI/rendering performance representative enough
+# for on-device testing.
+[profile.dev]
+opt-level = 1
+
+# Most of the hot rendering/UI code lives in dependencies (Xilem/Masonry/Vello/wgpu).
+[profile.dev.package."*"]
+opt-level = 3

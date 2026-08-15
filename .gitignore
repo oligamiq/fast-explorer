@@ -1,0 +1,14 @@
+/target
+**/target/
+*.xwd
+/.test-env/
+/dist/android/*.apk
+/.tmp-*
+/scratch/
+__pycache__/
+*.py[cod]
+/android-gradle/.gradle/
+/android-gradle/build/
+/android-gradle/app/build/
+/android-gradle/local.properties
+/dist/android/*.idsig
