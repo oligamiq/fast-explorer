@@ -2,10 +2,12 @@ package dev.oligami.fastexplorer;
 
 import com.google.androidgamesdk.GameActivity;
 import androidx.core.content.FileProvider;
+import androidx.core.view.WindowCompat;
 import android.Manifest;
 import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.graphics.Color;
 import android.net.ConnectivityManager;
 import android.net.LinkProperties;
 import android.net.Network;
@@ -61,6 +63,12 @@ public final class FastExplorerActivity extends GameActivity {
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
+        // Draw the file surface through the system-bar regions. Rust/Xilem
+        // applies the status-bar inset itself and adds a scrollable tail to the
+        // file list for the bottom navigation/gesture inset.
+        WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
+        getWindow().setNavigationBarColor(Color.TRANSPARENT);
+        getWindow().setNavigationBarContrastEnforced(false);
         if (Build.VERSION.SDK_INT >= 33) {
             backCallback = FastExplorerActivity::nativeBackPressed;
             getOnBackInvokedDispatcher().registerOnBackInvokedCallback(

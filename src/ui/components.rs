@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use xilem::core::one_of::Either;
+use xilem::masonry::kurbo::Rect;
 use xilem::masonry::peniko::{Color, ImageData};
 use xilem::masonry::properties::LineBreaking;
 use xilem::masonry::properties::ObjectFit;
@@ -17,7 +18,7 @@ use super::file_row::file_row_button;
 use super::file_shortcuts::file_list_shortcuts;
 use super::font::{label, prose, text_input};
 use super::icons::{LucideIcon, icon, progress_ring};
-use super::tab_drag::tab_drag_button;
+use super::tab_drag::{TabDragConfig, tab_drag_button};
 #[cfg(not(target_os = "android"))]
 use super::window_chrome::{CaptionButtonKind, caption_button, drag_region};
 use super::window_chrome::{NavigationButtonKind, navigation_button};
@@ -25,7 +26,7 @@ use crate::app::{
     AppState, EntryKind, FileCategory, FileEntry, SortDirection, SortField, TaildriveLocation,
     parse_taildrive_path, taildrive_path,
 };
-use crate::settings::{SearchMode, UiFont};
+use crate::settings::{PathOverflowBehavior, SearchMode, UiFont};
 use crate::theme::{AppearanceMode, Layout, ThemeColor, ThemePalette};
 
 fn compact_tab_width(title: &str, min_width: f64, max_width: f64) -> f64 {
@@ -36,47 +37,75 @@ fn compact_tab_width(title: &str, min_width: f64, max_width: f64) -> f64 {
     (label_width + Layout::TAB_CLOSE_WIDTH + 18.0).clamp(min_width, max_width)
 }
 
-#[cfg(not(target_os = "android"))]
-pub fn tab_bar(state: &AppState) -> impl WidgetView<AppState> + use<> {
-    let palette = state.palette();
+fn tab_strip_views(
+    state: &AppState,
+    min_tab_width: f64,
+    palette: ThemePalette,
+) -> (Vec<Box<AnyWidgetView<AppState>>>, f64, Option<Rect>) {
+    let tab_count = state.tab_count().max(1);
     let active = state.active_tab_index();
-    let tab_count = state.tab_count();
-    let can_close = true;
     let max_tab_width =
-        (Layout::TAB_LAYOUT_BUDGET / tab_count as f64).clamp(78.0, Layout::TAB_WIDTH);
-    let ids = state.tabs().iter().map(|tab| tab.id()).collect::<Vec<_>>();
+        (Layout::TAB_LAYOUT_BUDGET / tab_count as f64).clamp(min_tab_width, Layout::TAB_WIDTH);
     let titles = state
         .tabs()
         .iter()
         .map(|tab| tab.title())
         .collect::<Vec<_>>();
+    let ids = state.tabs().iter().map(|tab| tab.id()).collect::<Vec<_>>();
     let widths = titles
         .iter()
-        .map(|title| compact_tab_width(title, 78.0, max_tab_width))
+        .map(|title| compact_tab_width(title, min_tab_width, max_tab_width))
         .collect::<Vec<_>>();
-    let tabs = titles
+    let drop_targets = (0..titles.len()).collect::<Vec<_>>();
+    let total_width = widths.iter().sum::<f64>();
+
+    let mut x = 0.0;
+    let mut reveal_target = None;
+    for (index, width) in widths.iter().copied().enumerate() {
+        if index == active {
+            reveal_target = Some(Rect::new(x, 0.0, x + width, Layout::TOOL_HEIGHT));
+            break;
+        }
+        x += width;
+    }
+
+    let views = titles
         .into_iter()
         .enumerate()
         .map(|(index, title)| {
             tab_item(
-                index,
-                ids[index],
-                title,
-                index == active,
-                can_close,
-                widths[index],
-                widths.clone(),
+                TabItemSpec {
+                    index,
+                    drag_index: index,
+                    drop_targets: drop_targets.clone(),
+                    tab_id: ids[index],
+                    title,
+                    active: index == active,
+                    width: widths[index],
+                    widths: widths.clone(),
+                    scroll_leading: 0.0,
+                },
                 palette,
             )
+            .boxed()
         })
         .collect::<Vec<_>>();
 
+    (views, total_width, reveal_target)
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn tab_bar(state: &AppState) -> impl WidgetView<AppState> + use<> {
+    let palette = state.palette();
+    let (tabs, total_width, reveal_target) = tab_strip_views(state, 78.0, palette);
     let strip = flex_row(tabs)
         .gap(0.px())
         .cross_axis_alignment(CrossAxisAlignment::Center);
-    let tab_strip_width = (widths.iter().sum::<f64>() + 16.0).min(Layout::TAB_STRIP_MAX);
-    let tabs_scroll = sized_box(sized_box(portal(strip)).padding(Padding::from_vh(4.0, 8.0)))
-        .width(tab_strip_width.px());
+    let tab_strip_width = (total_width + 16.0).min(Layout::TAB_STRIP_MAX);
+    let tabs_scroll = sized_box(
+        sized_box(portal(strip).reveal_target(reveal_target)).padding(Padding::from_vh(4.0, 8.0)),
+    )
+    .width(tab_strip_width.px());
     let drag = sized_box(drag_region())
         .height(Layout::TAB_HEIGHT.px())
         .flex(1.0);
@@ -109,40 +138,11 @@ pub fn tab_bar(state: &AppState) -> impl WidgetView<AppState> + use<> {
 #[cfg(target_os = "android")]
 pub fn tab_bar(state: &AppState) -> impl WidgetView<AppState> + use<> {
     let palette = state.palette();
-    let tab_count = state.tab_count().max(1);
-    let active = state.active_tab_index();
-    let max_tab_width =
-        (Layout::TAB_LAYOUT_BUDGET / tab_count as f64).clamp(88.0, Layout::TAB_WIDTH);
-    let ids = state.tabs().iter().map(|tab| tab.id()).collect::<Vec<_>>();
-    let titles = state
-        .tabs()
-        .iter()
-        .map(|tab| tab.title())
-        .collect::<Vec<_>>();
-    let widths = titles
-        .iter()
-        .map(|title| compact_tab_width(title, 88.0, max_tab_width))
-        .collect::<Vec<_>>();
-    let tabs = titles
-        .into_iter()
-        .enumerate()
-        .map(|(index, title)| {
-            tab_item(
-                index,
-                ids[index],
-                title,
-                index == active,
-                true,
-                widths[index],
-                widths.clone(),
-                palette,
-            )
-        })
-        .collect::<Vec<_>>();
+    let (tabs, _, reveal_target) = tab_strip_views(state, 88.0, palette);
     let strip = flex_row(tabs)
         .gap(0.px())
         .cross_axis_alignment(CrossAxisAlignment::Center);
-    let tabs_scroll = sized_box(portal(strip))
+    let tabs_scroll = sized_box(portal(strip).reveal_target(reveal_target))
         .height(Layout::TAB_HEIGHT.px())
         .flex(1.0);
     sized_box(
@@ -350,12 +350,75 @@ fn files_settings_view(state: &AppState, palette: ThemePalette) -> Box<AnyWidget
         palette,
     );
 
+    let path_overflow = state.path_overflow_behavior();
+    let path_overflow_row = settings_row(
+        "Long path",
+        flex_row((
+            fill_choice_button(
+                "Don't move",
+                path_overflow == PathOverflowBehavior::Static,
+                |state| state.set_path_overflow_behavior(PathOverflowBehavior::Static),
+                palette,
+            )
+            .flex(1.0),
+            FlexSpacer::Fixed(6.px()),
+            fill_choice_button(
+                "Move then reset",
+                path_overflow == PathOverflowBehavior::ForwardReset,
+                |state| state.set_path_overflow_behavior(PathOverflowBehavior::ForwardReset),
+                palette,
+            )
+            .flex(1.0),
+        ))
+        .gap(0.px()),
+        palette,
+    );
+    let reset_delay = state.path_reset_delay_ms();
+    let path_reset_delay_row = settings_row(
+        "Reset wait",
+        flex_row((
+            fill_choice_button(
+                "1 s",
+                reset_delay == 1000,
+                |state| state.set_path_reset_delay_ms(1000),
+                palette,
+            )
+            .flex(1.0),
+            FlexSpacer::Fixed(6.px()),
+            fill_choice_button(
+                "3 s",
+                reset_delay == 3000,
+                |state| state.set_path_reset_delay_ms(3000),
+                palette,
+            )
+            .flex(1.0),
+            FlexSpacer::Fixed(6.px()),
+            fill_choice_button(
+                "5 s",
+                reset_delay == 5000,
+                |state| state.set_path_reset_delay_ms(5000),
+                palette,
+            )
+            .flex(1.0),
+        ))
+        .gap(0.px()),
+        palette,
+    );
+
     #[cfg(not(target_os = "android"))]
     {
         settings_card(
             "Files",
             "Less common view preferences for the active tab.",
-            hidden_files_row,
+            flex_col((
+                hidden_files_row,
+                FlexSpacer::Fixed(12.px()),
+                path_overflow_row,
+                FlexSpacer::Fixed(12.px()),
+                path_reset_delay_row,
+            ))
+            .gap(0.px())
+            .cross_axis_alignment(CrossAxisAlignment::Start),
             palette,
         )
         .boxed()
@@ -367,6 +430,10 @@ fn files_settings_view(state: &AppState, palette: ThemePalette) -> Box<AnyWidget
             "View preferences and safety options for file operations.",
             flex_col((
                 hidden_files_row,
+                FlexSpacer::Fixed(12.px()),
+                path_overflow_row,
+                FlexSpacer::Fixed(12.px()),
+                path_reset_delay_row,
                 FlexSpacer::Fixed(12.px()),
                 settings_row(
                     "Delete confirmation",
@@ -603,7 +670,16 @@ fn tailscale_settings_card(
         .tailscale_profiles()
         .iter()
         .cloned()
-        .map(|profile| tailscale_profile_card(profile, palette))
+        .map(|profile| {
+            let profile_id = profile.config.id.clone();
+            tailscale_profile_card(
+                profile,
+                state.tailscale_profile_hostname(&profile_id),
+                state.tailscale_offline_peers_expanded(&profile_id),
+                state.tailscale_offline_devices_expanded(&profile_id),
+                palette,
+            )
+        })
         .collect::<Vec<_>>();
     let profiles = if cards.is_empty() {
         Either::A(
@@ -633,24 +709,71 @@ fn tailscale_settings_card(
     )
 }
 
+fn compact_identity(value: &str, max_chars: usize) -> String {
+    let count = value.chars().count();
+    if count <= max_chars || max_chars < 8 {
+        return value.to_owned();
+    }
+    let side = (max_chars.saturating_sub(1)) / 2;
+    let start = value.chars().take(side).collect::<String>();
+    let end = value
+        .chars()
+        .rev()
+        .take(side)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>();
+    format!("{start}…{end}")
+}
+
 fn tailscale_profile_card(
     profile: crate::app::TailnetProfileState,
+    hostname_value: String,
+    offline_peers_expanded: bool,
+    offline_devices_expanded: bool,
     palette: ThemePalette,
 ) -> impl WidgetView<AppState> {
     let profile_id = profile.config.id.clone();
+    let label_value = profile.config.label.clone();
+    let label_change_id = profile_id.clone();
+    let label_enter_id = profile_id.clone();
+    let label_input = settings_text_input(
+        label_value,
+        "Tailnet label",
+        move |state, value| state.set_tailnet_label(&label_change_id, value),
+        move |state, value| state.set_tailnet_label(&label_enter_id, value),
+        palette,
+    );
+    let hostname_change_id = profile_id.clone();
+    let hostname_enter_id = profile_id.clone();
+    let hostname_input = settings_text_input(
+        hostname_value,
+        "fe-device",
+        move |state, value| state.set_tailnet_hostname(&hostname_change_id, value),
+        move |state, value| state.apply_tailnet_hostname(&hostname_enter_id, value),
+        palette,
+    );
     let enabled = profile.config.enabled;
     let status = profile.status;
     let network_name = if status.tailnet_name.is_empty() {
         "Not signed in".to_owned()
-    } else if status.magic_dns_suffix.is_empty() {
-        status.tailnet_name.clone()
     } else {
-        format!("{} — {}", status.tailnet_name, status.magic_dns_suffix)
+        // The editable FastExplorer label is the primary name. Keep the actual
+        // Tailscale identities available as secondary information, but compact
+        // both so a long organization/MagicDNS name cannot dominate the card.
+        let tailnet = compact_identity(&status.tailnet_name, 24);
+        let suffix = compact_identity(&status.magic_dns_suffix, 24);
+        if suffix.is_empty() || suffix == tailnet {
+            tailnet
+        } else {
+            format!("{tailnet} · {suffix}")
+        }
     };
     let identity = if !status.dns_name.is_empty() {
-        status.dns_name.clone()
+        compact_identity(&status.dns_name, 32)
     } else {
-        status.hostname.clone()
+        compact_identity(&status.hostname, 32)
     };
     let address = status.ips.first().cloned().unwrap_or_default();
     let mut status_text = if !enabled {
@@ -744,11 +867,32 @@ fn tailscale_profile_card(
         },
         palette,
     );
-    let peer_rows = status
-        .peers
+    let (online_peers, offline_peers): (Vec<_>, Vec<_>) =
+        status.peers.into_iter().partition(|peer| peer.online);
+    let mut peer_rows: Vec<Box<AnyWidgetView<AppState>>> = online_peers
         .into_iter()
-        .map(|peer| tailscale_peer_row(profile_id.clone(), peer, palette))
-        .collect::<Vec<_>>();
+        .map(|peer| tailscale_peer_row(profile_id.clone(), peer, palette).boxed())
+        .collect();
+    if !offline_peers.is_empty() {
+        let offline_count = offline_peers.len();
+        let accordion_id = profile_id.clone();
+        peer_rows.push(
+            accordion_button(
+                format!("Offline ({offline_count})"),
+                offline_peers_expanded,
+                move |state| state.toggle_tailscale_offline_peers(&accordion_id),
+                palette,
+            )
+            .boxed(),
+        );
+        if offline_peers_expanded {
+            peer_rows.extend(
+                offline_peers
+                    .into_iter()
+                    .map(|peer| tailscale_peer_row(profile_id.clone(), peer, palette).boxed()),
+            );
+        }
+    }
     let peers = if peer_rows.is_empty() {
         Either::A(
             prose("No other Tailnet devices are visible yet.")
@@ -762,11 +906,35 @@ fn tailscale_profile_card(
                 .cross_axis_alignment(CrossAxisAlignment::Start),
         )
     };
-    let taildrive_rows = status
+
+    let (online_taildrive, offline_taildrive): (Vec<_>, Vec<_>) = status
         .taildrive_devices
         .into_iter()
-        .map(|device| taildrive_device_row(device, palette))
-        .collect::<Vec<_>>();
+        .partition(|device| device.online);
+    let mut taildrive_rows: Vec<Box<AnyWidgetView<AppState>>> = online_taildrive
+        .into_iter()
+        .map(|device| taildrive_device_row(device, palette).boxed())
+        .collect();
+    if !offline_taildrive.is_empty() {
+        let offline_count = offline_taildrive.len();
+        let accordion_id = profile_id.clone();
+        taildrive_rows.push(
+            accordion_button(
+                format!("Offline ({offline_count})"),
+                offline_devices_expanded,
+                move |state| state.toggle_tailscale_offline_devices(&accordion_id),
+                palette,
+            )
+            .boxed(),
+        );
+        if offline_devices_expanded {
+            taildrive_rows.extend(
+                offline_taildrive
+                    .into_iter()
+                    .map(|device| taildrive_device_row(device, palette).boxed()),
+            );
+        }
+    }
     let taildrive_devices = if taildrive_rows.is_empty() {
         let message = if taildrive_scanning {
             "Scanning Taildrive shares…".to_owned()
@@ -807,12 +975,7 @@ fn tailscale_profile_card(
     sized_box(
         flex_col((
             flex_row((
-                sized_box(
-                    label(profile.config.label)
-                        .text_size(14.0)
-                        .color(palette.text),
-                )
-                .flex(1.0),
+                sized_box(label_input).height(34.px()).flex(1.0),
                 toolbar_button(
                     "Remove",
                     false,
@@ -822,14 +985,24 @@ fn tailscale_profile_card(
             ))
             .gap(0.px())
             .cross_axis_alignment(CrossAxisAlignment::Center),
-            FlexSpacer::Fixed(5.px()),
-            prose(format!("Network: {network_name}"))
-                .text_size(12.0)
+            FlexSpacer::Fixed(7.px()),
+            settings_row("Tailscale device name", hostname_input, palette),
+            FlexSpacer::Fixed(6.px()),
+            prose("Press Enter after changing the device name to reconnect with the new name.")
+                .text_size(11.0)
                 .text_color(palette.muted),
-            FlexSpacer::Fixed(3.px()),
-            prose(status_text).text_size(12.0).text_color(palette.text),
-            FlexSpacer::Fixed(3.px()),
-            prose(webdav_text).text_size(11.0).text_color(palette.muted),
+            FlexSpacer::Fixed(6.px()),
+            flex_col((
+                prose(format!("Network: {network_name}"))
+                    .text_size(12.0)
+                    .text_color(palette.muted),
+                FlexSpacer::Fixed(3.px()),
+                prose(status_text).text_size(12.0).text_color(palette.text),
+                FlexSpacer::Fixed(3.px()),
+                prose(webdav_text).text_size(11.0).text_color(palette.muted),
+            ))
+            .gap(0.px())
+            .cross_axis_alignment(CrossAxisAlignment::Start),
             FlexSpacer::Fixed(8.px()),
             actions,
             FlexSpacer::Fixed(10.px()),
@@ -1014,6 +1187,9 @@ pub fn address_bar(state: &AppState) -> impl WidgetView<AppState> + use<> {
         AppState::set_address_input,
         AppState::submit_address,
         false,
+        state.path_overflow_behavior() == PathOverflowBehavior::ForwardReset,
+        state.path_reset_delay_ms() as f64 / 1000.0,
+        10.0,
         state.is_dark_theme(),
         palette,
     );
@@ -1023,6 +1199,9 @@ pub fn address_bar(state: &AppState) -> impl WidgetView<AppState> + use<> {
         AppState::set_search_input,
         AppState::submit_search,
         true,
+        false,
+        3.0,
+        14.0,
         state.is_dark_theme(),
         palette,
     );
@@ -1078,7 +1257,7 @@ pub fn address_bar(state: &AppState) -> impl WidgetView<AppState> + use<> {
         )
     };
 
-    sized_box(
+    let address_controls = sized_box(
         flex_row((
             navigation_button(NavigationButtonKind::Back, !state.can_go_back(), palette),
             navigation_button(
@@ -1093,6 +1272,15 @@ pub fn address_bar(state: &AppState) -> impl WidgetView<AppState> + use<> {
             address_group,
             FlexSpacer::Fixed(8.px()),
             search_group,
+        ))
+        .gap(0.px())
+        .cross_axis_alignment(CrossAxisAlignment::Center),
+    )
+    .flex(1.0);
+
+    sized_box(
+        flex_row((
+            address_controls,
             FlexSpacer::Fixed(8.px()),
             icon_button(
                 LucideIcon::Settings,
@@ -1124,6 +1312,9 @@ pub fn address_bar(state: &AppState) -> impl WidgetView<AppState> + use<> {
         AppState::set_address_input,
         AppState::submit_address,
         false,
+        state.path_overflow_behavior() == PathOverflowBehavior::ForwardReset,
+        state.path_reset_delay_ms() as f64 / 1000.0,
+        10.0,
         state.is_dark_theme(),
         palette,
     );
@@ -1133,6 +1324,9 @@ pub fn address_bar(state: &AppState) -> impl WidgetView<AppState> + use<> {
         AppState::set_search_input,
         AppState::submit_search,
         true,
+        false,
+        3.0,
+        14.0,
         state.is_dark_theme(),
         palette,
     );
@@ -1260,7 +1454,7 @@ pub fn address_bar(state: &AppState) -> impl WidgetView<AppState> + use<> {
     let location_row = sized_box(
         flex_row((
             address_group.flex(1.0),
-            FlexSpacer::Fixed(4.px()),
+            FlexSpacer::Fixed(8.px()),
             search_group,
         ))
         .gap(0.px())
@@ -1283,12 +1477,38 @@ pub fn address_bar(state: &AppState) -> impl WidgetView<AppState> + use<> {
     .background_color(palette.chrome)
 }
 
+fn settings_text_input(
+    value: String,
+    placeholder: &'static str,
+    on_change: impl Fn(&mut AppState, String) + Send + Sync + 'static,
+    on_enter: impl Fn(&mut AppState, String) + Send + Sync + 'static,
+    palette: ThemePalette,
+) -> impl WidgetView<AppState> {
+    text_input(value, on_change)
+        .placeholder(placeholder)
+        .insert_newline(InsertNewline::Never)
+        .on_enter(on_enter)
+        .text_color(palette.text)
+        .caret_color(palette.focus)
+        .padding(Padding::from_vh(5.0, 9.0))
+        .background_color(palette.surface)
+        .border(palette.border, 1.0)
+        .corner_radius(Layout::RADIUS)
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "UI text field helper carries callbacks and field behavior explicitly"
+)]
 fn themed_text_input(
     value: String,
     placeholder: &'static str,
     on_change: impl Fn(&mut AppState, String) + Send + Sync + 'static,
     on_enter: impl Fn(&mut AppState, String) + Send + Sync + 'static,
     auto_focus: bool,
+    marquee_when_unfocused: bool,
+    marquee_end_hold_seconds: f64,
+    horizontal_padding: f64,
     dark: bool,
     palette: ThemePalette,
 ) -> impl WidgetView<AppState> {
@@ -1299,9 +1519,11 @@ fn themed_text_input(
                 .insert_newline(InsertNewline::Never)
                 .on_enter(on_enter)
                 .auto_focus(auto_focus)
+                .marquee_when_unfocused(marquee_when_unfocused)
+                .marquee_end_hold_seconds(marquee_end_hold_seconds)
                 .text_color(palette.text)
                 .caret_color(palette.focus)
-                .padding(6.0)
+                .padding(Padding::from_vh(6.0, horizontal_padding))
                 .background_color(palette.surface)
                 .border(palette.border, 1.0)
                 .corner_radius(Layout::RADIUS),
@@ -1313,9 +1535,11 @@ fn themed_text_input(
                 .insert_newline(InsertNewline::Never)
                 .on_enter(on_enter)
                 .auto_focus(auto_focus)
+                .marquee_when_unfocused(marquee_when_unfocused)
+                .marquee_end_hold_seconds(marquee_end_hold_seconds)
                 .text_color(palette.text)
                 .caret_color(palette.focus)
-                .padding(6.0)
+                .padding(Padding::from_vh(6.0, horizontal_padding))
                 .background_color(palette.surface)
                 .border(palette.border, 1.0)
                 .corner_radius(Layout::RADIUS),
@@ -1769,7 +1993,10 @@ pub fn file_area(state: &AppState) -> impl WidgetView<AppState> + use<> {
     let list_content = if item_count == 0 {
         Either::A(empty_file_state(state, palette))
     } else {
-        Either::B(virtual_scroll(0..item_count as i64, virtual_file_row))
+        Either::B(
+            virtual_scroll(0..item_count as i64, virtual_file_row)
+                .reset_on_change(state.file_scroll_reset_key()),
+        )
     };
     let shortcuts = file_list_shortcuts(
         list_content,
@@ -1830,7 +2057,14 @@ pub fn file_area(state: &AppState) -> impl WidgetView<AppState> + use<> {
     let list_content = if item_count == 0 {
         Either::A(empty_file_state(state, palette))
     } else {
-        Either::B(virtual_scroll(0..item_count as i64, virtual_file_row))
+        // Keep a real scrollable tail below the last file row. The files page
+        // draws behind Android's navigation/gesture area, so this spacer lets
+        // the last tappable row move completely above that untappable inset.
+        let virtual_item_count = item_count.saturating_add(1);
+        Either::B(
+            virtual_scroll(0..virtual_item_count as i64, android_virtual_file_row)
+                .reset_on_change(state.file_scroll_reset_key()),
+        )
     };
     let shortcuts = file_list_shortcuts(
         list_content,
@@ -2008,6 +2242,17 @@ fn inline_rename_input(
         .background_color(palette.surface)
         .border(palette.focus, 1.0)
         .corner_radius(Layout::RADIUS)
+}
+
+#[cfg(target_os = "android")]
+fn android_virtual_file_row(state: &mut AppState, index: i64) -> impl WidgetView<AppState> + use<> {
+    let item_count = state.active_tab().entries.len();
+    if usize::try_from(index).ok() == Some(item_count) {
+        let safe_tail = state.android_insets().bottom.max(1.0);
+        Either::A(sized_box(label("")).height(safe_tail.px()).expand_width())
+    } else {
+        Either::B(virtual_file_row(state, index))
+    }
 }
 
 fn virtual_file_row(state: &mut AppState, index: i64) -> impl WidgetView<AppState> + use<> {
@@ -2298,16 +2543,30 @@ fn quick_path_button(
     .expand_width()
 }
 
-fn tab_item(
+struct TabItemSpec {
     index: usize,
+    drag_index: usize,
+    drop_targets: Vec<usize>,
     tab_id: u64,
     title: String,
     active: bool,
-    can_close: bool,
-    tab_width: f64,
-    tab_widths: Vec<f64>,
-    palette: ThemePalette,
-) -> impl WidgetView<AppState> {
+    width: f64,
+    widths: Vec<f64>,
+    scroll_leading: f64,
+}
+
+fn tab_item(spec: TabItemSpec, palette: ThemePalette) -> impl WidgetView<AppState> {
+    let TabItemSpec {
+        index,
+        drag_index,
+        drop_targets,
+        tab_id,
+        title,
+        active,
+        width: tab_width,
+        widths: tab_widths,
+        scroll_leading,
+    } = spec;
     let background = if active {
         palette.tab_active
     } else {
@@ -2326,7 +2585,7 @@ fn tab_item(
     )
     .expand_width()
     .padding(Padding::from_vh(5.0, 5.0));
-    let close = tab_close_button(index, can_close, palette);
+    let close = tab_close_button(index, true, palette);
     let border_color = if active {
         palette.border_strong
     } else {
@@ -2343,21 +2602,25 @@ fn tab_item(
     .corner_radius(Layout::RADIUS);
     let drag = tab_drag_button(
         surface,
-        tab_id,
-        index,
-        tab_widths,
-        Layout::TAB_CLOSE_WIDTH,
-        accessibility_label,
-        active,
-        background,
-        border_color,
-        palette.text,
+        TabDragConfig {
+            tab_id,
+            source_index: index,
+            drag_index,
+            tab_widths,
+            drop_targets,
+            scroll_leading,
+            drag_handle_right_inset: Layout::TAB_CLOSE_WIDTH,
+            accessibility_label,
+            selected: active,
+            background,
+            border: border_color,
+            text_color: palette.text,
+        },
     );
 
-    sized_box(drag)
+    sized_box(sized_box(drag).padding(Padding::horizontal(2.0)))
         .width(tab_width.px())
         .height(Layout::TOOL_HEIGHT.px())
-        .padding(Padding::horizontal(2.0))
 }
 
 fn tab_close_button(
@@ -3473,6 +3736,34 @@ fn field_icon_button(
             .corner_radius(Layout::RADIUS),
     )
     .height(Layout::TOOL_HEIGHT.px())
+}
+
+fn accordion_button(
+    text: String,
+    expanded: bool,
+    callback: impl Fn(&mut AppState) + Send + Sync + 'static,
+    palette: ThemePalette,
+) -> impl WidgetView<AppState> {
+    let icon_kind = if expanded {
+        LucideIcon::Minus
+    } else {
+        LucideIcon::Plus
+    };
+    let content = flex_row((
+        icon(icon_kind, palette.muted, 13.0, "Toggle offline devices"),
+        FlexSpacer::Fixed(5.px()),
+        label(text).text_size(12.0).color(palette.muted),
+        FlexSpacer::Flex(1.0),
+    ))
+    .gap(0.px())
+    .cross_axis_alignment(CrossAxisAlignment::Center);
+    button(content, callback)
+        .padding(Padding::from_vh(5.0, 7.0))
+        .background_color(palette.surface)
+        .active_background_color(palette.accent_soft)
+        .border(palette.surface, 0.0)
+        .hovered_border_color(palette.border_strong)
+        .corner_radius(Layout::RADIUS)
 }
 
 fn toolbar_button(

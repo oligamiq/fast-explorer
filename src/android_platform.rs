@@ -741,7 +741,7 @@ fn provider_valid_profile_id(value: &str) -> bool {
 
 fn documents_provider_status(args: &serde_json::Value) -> Result<serde_json::Value, String> {
     let profile = provider_arg(args, "profile")?;
-    crate::tailscale::start(profile)?;
+    crate::tailscale::start(profile, "")?;
     let mut status = crate::tailscale::status(profile)?;
     for _ in 0..8 {
         if !status.taildrive_scanning || !status.taildrive_devices.is_empty() {
@@ -779,7 +779,7 @@ fn documents_provider_status(args: &serde_json::Value) -> Result<serde_json::Val
 }
 
 fn documents_provider_ensure_share(profile: &str, device: &str, share: &str) -> Result<(), String> {
-    crate::tailscale::start(profile)?;
+    crate::tailscale::start(profile, "")?;
     let mut last_state = String::new();
     let mut last_error = String::new();
     for _ in 0..12 {

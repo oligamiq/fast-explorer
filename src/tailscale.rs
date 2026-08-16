@@ -229,6 +229,11 @@ pub struct TailscalePing {
 pub enum Command {
     Start {
         profile_id: String,
+        hostname: String,
+    },
+    Restart {
+        profile_id: String,
+        hostname: String,
     },
     Refresh {
         profile_id: String,
@@ -1276,9 +1281,25 @@ fn bridge_logout(_profile: &std::ffi::CString) -> Result<(), String> {
     Err("embedded Tailscale is not available on this platform".to_owned())
 }
 
-pub fn start(profile_id: &str) -> Result<(), String> {
-    let profile = c_string(profile_id, "Tailscale profile ID")?;
+pub fn save_hostname(profile_id: &str, hostname: &str) -> Result<(), String> {
     let state_dir = profile_state_dir(profile_id)?;
+    std::fs::create_dir_all(&state_dir)
+        .map_err(|error| format!("create Tailscale state directory: {error}"))?;
+    if !hostname.is_empty() {
+        std::fs::write(state_dir.join("hostname"), format!("{hostname}\n"))
+            .map_err(|error| format!("save Tailscale hostname: {error}"))?;
+    }
+    Ok(())
+}
+
+pub fn start(profile_id: &str, hostname: &str) -> Result<(), String> {
+    let profile = c_string(profile_id, "Tailscale profile ID")?;
+    if !hostname.is_empty() {
+        save_hostname(profile_id, hostname)?;
+    }
+    let state_dir = profile_state_dir(profile_id)?;
+    std::fs::create_dir_all(&state_dir)
+        .map_err(|error| format!("create Tailscale state directory: {error}"))?;
     let state = c_string(&state_dir.to_string_lossy(), "Tailscale state path")?;
     let share_root = SHARE_ROOT
         .get()
@@ -1904,12 +1925,26 @@ pub fn network_task()
             loop {
                 tokio::select! {
                     command = receiver.recv() => match command {
-                        Some(Command::Start { profile_id }) => {
+                        Some(Command::Start { profile_id, hostname }) => {
                             desired.insert(profile_id.clone());
                             let completion = started_tx.clone();
                             tokio::spawn(async move {
                                 let id = profile_id.clone();
-                                let result = blocking(move || start(&id)).await;
+                                let result = blocking(move || start(&id, &hostname)).await;
+                                let _ = completion.send((profile_id, result));
+                            });
+                        }
+                        Some(Command::Restart { profile_id, hostname }) => {
+                            desired.insert(profile_id.clone());
+                            started.remove(&profile_id);
+                            let completion = started_tx.clone();
+                            tokio::spawn(async move {
+                                let id = profile_id.clone();
+                                let result = blocking(move || {
+                                    stop(&id)?;
+                                    start(&id, &hostname)
+                                })
+                                .await;
                                 let _ = completion.send((profile_id, result));
                             });
                         }

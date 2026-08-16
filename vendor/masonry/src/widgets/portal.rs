@@ -40,6 +40,7 @@ pub struct Portal<W: Widget + ?Sized> {
     scrollbar_vertical: WidgetPod<ScrollBar>,
     scrollbar_vertical_visible: bool,
     touch_pan: Option<(PointerId, Point, Point)>,
+    pending_pan_to: Option<Rect>,
 }
 
 // --- MARK: BUILDERS
@@ -59,6 +60,7 @@ impl<W: Widget + ?Sized> Portal<W> {
             scrollbar_vertical: WidgetPod::new(ScrollBar::new(Axis::Vertical, 1.0, 1.0)),
             scrollbar_vertical_visible: false,
             touch_pan: None,
+            pending_pan_to: None,
         }
     }
 
@@ -100,6 +102,14 @@ impl<W: Widget + ?Sized> Portal<W> {
     /// the `Portal`.
     pub fn content_must_fill(mut self, must_fill: bool) -> Self {
         self.must_fill = must_fill;
+        self
+    }
+
+    /// Request that `target`, expressed in child coordinates, is visible after
+    /// the first layout. This is useful for scrollable tab strips whose active
+    /// item may start outside the initial viewport.
+    pub fn initial_pan_to(mut self, target: Rect) -> Self {
+        self.pending_pan_to = Some(target);
         self
     }
 }
@@ -214,6 +224,14 @@ impl<W: Widget + FromDynWidget + ?Sized> Portal<W> {
         this.ctx.request_layout();
     }
 
+    /// Request that `target`, expressed in child coordinates, is revealed on
+    /// the next layout pass. Delaying until layout guarantees current child and
+    /// viewport sizes are available.
+    pub fn set_pending_pan_to(this: &mut WidgetMut<'_, Self>, target: Rect) {
+        this.widget.pending_pan_to = Some(target);
+        this.ctx.request_layout();
+    }
+
     #[expect(missing_docs, reason = "TODO")]
     pub fn set_viewport_pos(this: &mut WidgetMut<'_, Self>, position: Point) -> bool {
         let portal_size = this.ctx.size();
@@ -300,6 +318,9 @@ impl<W: Widget + FromDynWidget + ?Sized> Widget for Portal<W> {
                     && id == active_id
                 {
                     let current = Point::new(current.position.x, current.position.y);
+                    if (current - start).hypot2() > 1.0 {
+                        self.pending_pan_to = None;
+                    }
                     self.set_viewport_pos_raw(
                         portal_size,
                         content_size,
@@ -349,6 +370,7 @@ impl<W: Widget + FromDynWidget + ?Sized> Widget for Portal<W> {
                 }
             }
             PointerEvent::Scroll(PointerScrollEvent { delta, .. }) => {
+                self.pending_pan_to = None;
                 // TODO - Remove reference to scale factor.
                 // See https://github.com/linebender/xilem/issues/1264
                 let delta = match delta {
@@ -425,6 +447,7 @@ impl<W: Widget + FromDynWidget + ?Sized> Widget for Portal<W> {
         }
 
         if scrollbar_moved {
+            self.pending_pan_to = None;
             ctx.request_compose();
         }
     }
@@ -506,10 +529,22 @@ impl<W: Widget + FromDynWidget + ?Sized> Widget for Portal<W> {
 
         self.content_size = content_size;
 
-        // TODO - document better
-        // Recompute the portal offset for the new layout
+        // Recompute the portal offset for the new layout, then honor a pending
+        // reveal request now that both viewport and content sizes are known.
         self.set_viewport_pos_raw(portal_size, content_size, self.viewport_pos);
-        // TODO - recompute portal progress
+        if let Some(target) = self.pending_pan_to {
+            // Xilem layouts can first visit a Portal while it is still effectively
+            // unconstrained. Keep the reveal request until a real scroll range
+            // exists; otherwise the request would be consumed before the final
+            // viewport width is known.
+            let has_scroll_range = content_size.width > portal_size.width + 0.5
+                || content_size.height > portal_size.height + 0.5;
+            if has_scroll_range {
+                // Keep following this target through subsequent layout passes.
+                // User-initiated scrolling clears the follow target below.
+                self.pan_viewport_to_raw(portal_size, content_size, target);
+            }
+        }
 
         ctx.set_clip_path(portal_size.to_rect());
 
@@ -528,6 +563,11 @@ impl<W: Widget + FromDynWidget + ?Sized> Widget for Portal<W> {
             let (scrollbar, _) = ctx.get_raw_mut(&mut self.scrollbar_horizontal);
             scrollbar.portal_size = portal_size.width;
             scrollbar.content_size = content_size.width;
+            scrollbar.cursor_progress = if content_size.width > portal_size.width {
+                self.viewport_pos.x / (content_size.width - portal_size.width)
+            } else {
+                0.0
+            };
             // TODO - request paint for scrollbar?
 
             let scrollbar_size = ctx.run_layout(&mut self.scrollbar_horizontal, bc);
@@ -545,6 +585,11 @@ impl<W: Widget + FromDynWidget + ?Sized> Widget for Portal<W> {
             let (scrollbar, _) = ctx.get_raw_mut(&mut self.scrollbar_vertical);
             scrollbar.portal_size = portal_size.height;
             scrollbar.content_size = content_size.height;
+            scrollbar.cursor_progress = if content_size.height > portal_size.height {
+                self.viewport_pos.y / (content_size.height - portal_size.height)
+            } else {
+                0.0
+            };
             // TODO - request paint for scrollbar?
 
             let scrollbar_size = ctx.run_layout(&mut self.scrollbar_vertical, bc);

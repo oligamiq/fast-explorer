@@ -90,6 +90,8 @@ where
         disabled: false,
         auto_focus: false,
         initial_selection: None,
+        marquee_when_unfocused: false,
+        marquee_end_hold_seconds: 3.0,
         // Since we don't support setting the word wrapping, we can default to
         // not clipping
         clip: true,
@@ -111,6 +113,8 @@ pub struct TextInput<State, Action> {
     disabled: bool,
     auto_focus: bool,
     initial_selection: Option<(usize, usize)>,
+    marquee_when_unfocused: bool,
+    marquee_end_hold_seconds: f64,
     clip: bool,
     // TODO: add more attributes of `masonry::widgets::TextInput`
 }
@@ -218,6 +222,18 @@ impl<State: 'static, Action: 'static> TextInput<State, Action> {
         self
     }
 
+    /// Animate horizontally overflowing text while this input is unfocused.
+    pub fn marquee_when_unfocused(mut self, enabled: bool) -> Self {
+        self.marquee_when_unfocused = enabled;
+        self
+    }
+
+    /// Set the pause at the end of the unfocused marquee before reset.
+    pub fn marquee_end_hold_seconds(mut self, seconds: f64) -> Self {
+        self.marquee_end_hold_seconds = seconds.clamp(0.5, 10.0);
+        self
+    }
+
     /// Set whether the contained text will be clipped to the box if it overflows.
     ///
     /// Please note:
@@ -265,6 +281,8 @@ impl<State: 'static, Action: 'static> View<State, Action, ViewCtx> for TextInput
             widgets::TextInput::from_text_area(NewWidget::new_with_props(text_area, props))
                 .with_clip(self.clip)
                 .with_auto_focus(self.auto_focus)
+                .with_marquee_when_unfocused(self.marquee_when_unfocused)
+                .with_marquee_end_hold_seconds(self.marquee_end_hold_seconds)
                 .with_placeholder(self.placeholder.clone());
         if let Some((start, end)) = self.initial_selection {
             text_input = text_input.with_initial_selection(start, end);
@@ -313,6 +331,21 @@ impl<State: 'static, Action: 'static> View<State, Action, ViewCtx> for TextInput
         if self.clip != prev.clip {
             widgets::TextInput::set_clip(&mut element, self.clip);
         }
+        if self.marquee_when_unfocused != prev.marquee_when_unfocused {
+            widgets::TextInput::set_marquee_when_unfocused(
+                &mut element,
+                self.marquee_when_unfocused,
+            );
+        }
+
+        if (self.marquee_end_hold_seconds - prev.marquee_end_hold_seconds).abs()
+            > f64::EPSILON
+        {
+            widgets::TextInput::set_marquee_end_hold_seconds(
+                &mut element,
+                self.marquee_end_hold_seconds,
+            );
+        }
 
         let mut text_area = widgets::TextInput::text_mut(&mut element);
 
@@ -323,7 +356,8 @@ impl<State: 'static, Action: 'static> View<State, Action, ViewCtx> for TextInput
         // without calling `set_text`.
 
         // This is probably not the right behaviour, but determining what is the right behaviour is hard
-        if text_area.widget.text() != &self.contents {
+        let contents_changed = text_area.widget.text() != &self.contents;
+        if contents_changed {
             widgets::TextArea::reset_text(&mut text_area, &self.contents);
         }
 
@@ -338,6 +372,10 @@ impl<State: 'static, Action: 'static> View<State, Action, ViewCtx> for TextInput
         }
         if prev.insert_newline != self.insert_newline {
             widgets::TextArea::set_insert_newline(&mut text_area, self.insert_newline);
+        }
+        drop(text_area);
+        if contents_changed {
+            widgets::TextInput::restart_marquee(&mut element);
         }
     }
 

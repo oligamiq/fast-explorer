@@ -28,6 +28,7 @@ name = "android.permission.REQUEST_INSTALL_PACKAGES"
 
 [package.metadata.android.application]
 label = "FastExplorer"
+icon = "@mipmap/ic_launcher"
 debuggable = true
 theme = "@style/FastExplorerTheme"
 has_code = true

@@ -235,6 +235,13 @@ impl MutateCtx<'_> {
         self.global_state.next_focused_widget = Some(target);
     }
 
+    /// Ask ancestor scroll containers to reveal an area of this widget after a view rebuild.
+    pub fn request_scroll_to(&mut self, rect: Rect) {
+        self.global_state
+            .scroll_request_targets
+            .push((self.widget_state.id, rect));
+    }
+
     /// Return a [`WidgetMut`] to a child widget.
     pub fn get_mut<'c, Child: Widget + FromDynWidget + ?Sized>(
         &'c mut self,
@@ -366,6 +373,13 @@ impl UpdateCtx<'_> {
     pub fn set_focus(&mut self, target: WidgetId) {
         trace!("set_focus target={:?}", target);
         self.global_state.next_focused_widget = Some(target);
+    }
+
+    /// Ask ancestor scroll containers to reveal an area of this widget during an update pass.
+    pub fn request_scroll_to(&mut self, rect: Rect) {
+        self.global_state
+            .scroll_request_targets
+            .push((self.widget_state.id, rect));
     }
 }
 
@@ -1401,11 +1415,12 @@ impl_context_method!(
             selection: std::ops::Range<usize>,
             compose: Option<std::ops::Range<usize>>,
         ) {
-            self.global_state.emit_signal(RenderRootSignal::ImeTextState {
-                text,
-                selection,
-                compose,
-            });
+            self.global_state
+                .emit_signal(RenderRootSignal::ImeTextState {
+                    text,
+                    selection,
+                    compose,
+                });
         }
 
         /// Set the contents of the platform clipboard.

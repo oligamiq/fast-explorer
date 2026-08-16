@@ -3,7 +3,7 @@
 
 use std::marker::PhantomData;
 
-use masonry::widgets;
+use masonry::{kurbo::Rect, widgets};
 
 use crate::core::{MessageContext, Mut, ViewMarker};
 use crate::{MessageResult, Pod, View, ViewCtx, WidgetView};
@@ -17,6 +17,7 @@ where
 {
     Portal {
         child,
+        reveal_target: None,
         phantom: PhantomData,
     }
 }
@@ -25,7 +26,17 @@ where
 #[must_use = "View values do nothing unless provided to Xilem."]
 pub struct Portal<V, State, Action> {
     child: V,
+    reveal_target: Option<Rect>,
     phantom: PhantomData<(State, Action)>,
+}
+
+impl<V, State, Action> Portal<V, State, Action> {
+    /// Reveal the given child-coordinate rectangle on initial layout and when
+    /// the target changes on a later rebuild.
+    pub fn reveal_target(mut self, target: Option<Rect>) -> Self {
+        self.reveal_target = target;
+        self
+    }
 }
 
 impl<V, State, Action> ViewMarker for Portal<V, State, Action> {}
@@ -42,7 +53,11 @@ where
         // The Portal `View` doesn't get any messages directly (yet - scroll events?), so doesn't need to
         // use ctx.with_id.
         let (child, child_state) = self.child.build(ctx, app_state);
-        let widget_pod = ctx.create_pod(widgets::Portal::new(child.new_widget));
+        let mut widget = widgets::Portal::new(child.new_widget);
+        if let Some(target) = self.reveal_target {
+            widget = widget.initial_pan_to(target);
+        }
+        let widget_pod = ctx.create_pod(widget);
         (widget_pod, child_state)
     }
 
@@ -54,6 +69,11 @@ where
         mut element: Mut<'_, Self::Element>,
         app_state: &mut State,
     ) {
+        if self.reveal_target != prev.reveal_target
+            && let Some(target) = self.reveal_target
+        {
+            widgets::Portal::set_pending_pan_to(&mut element, target);
+        }
         let child_element = widgets::Portal::child_mut(&mut element);
         self.child
             .rebuild(&prev.child, view_state, ctx, child_element, app_state);

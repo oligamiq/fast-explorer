@@ -7,12 +7,12 @@ use accesskit::{Node, Role};
 use masonry_core::core::HasProperty;
 use tracing::{Span, trace_span};
 use vello::Scene;
-use vello::kurbo::{Affine, Point, Rect, Size};
+use vello::kurbo::{Affine, Point, Rect, Size, Vec2};
 
 use crate::core::{
-    AccessCtx, ArcStr, BoxConstraints, ChildrenIds, LayoutCtx, NewWidget, NoAction, PaintCtx,
-    Properties, PropertiesMut, PropertiesRef, RegisterCtx, Update, UpdateCtx, Widget, WidgetId,
-    WidgetMut, WidgetPod,
+    AccessCtx, ArcStr, BoxConstraints, ChildrenIds, ComposeCtx, LayoutCtx, NewWidget, NoAction,
+    PaintCtx, Properties, PropertiesMut, PropertiesRef, RegisterCtx, Update, UpdateCtx, Widget,
+    WidgetId, WidgetMut, WidgetPod,
 };
 use crate::properties::{
     Background, BorderColor, BorderWidth, BoxShadow, CaretColor, ContentColor, CornerRadius,
@@ -20,6 +20,11 @@ use crate::properties::{
 };
 use crate::util::{fill, stroke};
 use crate::widgets::{Label, TextArea};
+
+const CARET_SCROLL_MARGIN: f64 = 8.0;
+const MARQUEE_START_HOLD_SECONDS: f64 = 0.8;
+const DEFAULT_MARQUEE_END_HOLD_SECONDS: f64 = 3.0;
+const MARQUEE_SPEED: f64 = 30.0;
 
 /// The text input widget displays text which can be edited by the user,
 /// inside a surrounding box.
@@ -42,6 +47,15 @@ pub struct TextInput {
     clip: bool,
     auto_focus: bool,
     initial_selection: Option<(usize, usize)>,
+    /// Current horizontal translation used to keep the caret visible or run a marquee.
+    scroll_x: f64,
+    /// Maximum scroll based on the laid-out text width and current viewport.
+    max_scroll_x: f64,
+    /// Animate overflowing unfocused text from start to end and back.
+    marquee_when_unfocused: bool,
+    marquee_end_hold_seconds: f64,
+    marquee_elapsed: f64,
+    child_focused: bool,
 }
 
 impl TextInput {
@@ -61,6 +75,12 @@ impl TextInput {
             clip: false,
             auto_focus: false,
             initial_selection: None,
+            scroll_x: 0.0,
+            max_scroll_x: 0.0,
+            marquee_when_unfocused: false,
+            marquee_end_hold_seconds: DEFAULT_MARQUEE_END_HOLD_SECONDS,
+            marquee_elapsed: 0.0,
+            child_focused: false,
         }
     }
 
@@ -84,6 +104,21 @@ impl TextInput {
     /// To modify this on active text input, use [`set_clip`](Self::set_clip).
     pub fn with_clip(mut self, clip: bool) -> Self {
         self.clip = clip;
+        self
+    }
+
+    /// Animate overflowing text while this input is unfocused.
+    ///
+    /// The animation moves only from start to end, pauses there, then snaps
+    /// back to the start. Focusing the editor suspends the animation.
+    pub fn with_marquee_when_unfocused(mut self, enabled: bool) -> Self {
+        self.marquee_when_unfocused = enabled;
+        self
+    }
+
+    /// Set how long an unfocused marquee waits at the end before snapping back.
+    pub fn with_marquee_end_hold_seconds(mut self, seconds: f64) -> Self {
+        self.marquee_end_hold_seconds = seconds.clamp(0.5, 10.0);
         self
     }
 
@@ -138,6 +173,45 @@ impl TextInput {
         this.widget.clip = clip;
         this.ctx.request_layout();
     }
+
+    /// Enable or disable the unfocused marquee for an active input.
+    pub fn set_marquee_when_unfocused(this: &mut WidgetMut<'_, Self>, enabled: bool) {
+        if this.widget.marquee_when_unfocused == enabled {
+            return;
+        }
+        this.widget.marquee_when_unfocused = enabled;
+        this.widget.marquee_elapsed = 0.0;
+        if !enabled && !this.widget.child_focused {
+            this.widget.scroll_x = 0.0;
+        }
+        if enabled && !this.widget.child_focused {
+            this.ctx.request_anim_frame();
+        }
+        this.ctx.request_compose();
+    }
+
+    /// Change how long the marquee waits at the end before resetting.
+    pub fn set_marquee_end_hold_seconds(this: &mut WidgetMut<'_, Self>, seconds: f64) {
+        let seconds = seconds.clamp(0.5, 10.0);
+        if (this.widget.marquee_end_hold_seconds - seconds).abs() <= f64::EPSILON {
+            return;
+        }
+        this.widget.marquee_end_hold_seconds = seconds;
+        this.widget.marquee_elapsed = 0.0;
+        if this.widget.marquee_when_unfocused && !this.widget.child_focused {
+            this.ctx.request_anim_frame();
+        }
+    }
+
+    /// Restart the unfocused marquee after the displayed value changes.
+    pub fn restart_marquee(this: &mut WidgetMut<'_, Self>) {
+        this.widget.marquee_elapsed = 0.0;
+        if this.widget.marquee_when_unfocused && !this.widget.child_focused {
+            this.widget.scroll_x = 0.0;
+            this.ctx.request_compose();
+            this.ctx.request_anim_frame();
+        }
+    }
 }
 
 impl HasProperty<Background> for TextInput {}
@@ -155,6 +229,34 @@ impl HasProperty<UnfocusedSelectionColor> for TextInput {}
 // --- MARK: IMPL WIDGET
 impl Widget for TextInput {
     type Action = NoAction;
+
+    fn on_anim_frame(
+        &mut self,
+        ctx: &mut UpdateCtx<'_>,
+        _props: &mut PropertiesMut<'_>,
+        interval: u64,
+    ) {
+        if !self.marquee_when_unfocused || self.child_focused || self.max_scroll_x <= 0.0 {
+            return;
+        }
+
+        self.marquee_elapsed += interval as f64 * 1e-9;
+        let travel_seconds = self.max_scroll_x / MARQUEE_SPEED;
+        let cycle =
+            MARQUEE_START_HOLD_SECONDS + travel_seconds + self.marquee_end_hold_seconds;
+        let phase = self.marquee_elapsed.rem_euclid(cycle);
+        self.scroll_x = if phase < MARQUEE_START_HOLD_SECONDS {
+            0.0
+        } else if phase < MARQUEE_START_HOLD_SECONDS + travel_seconds {
+            (phase - MARQUEE_START_HOLD_SECONDS) * MARQUEE_SPEED
+        } else {
+            self.max_scroll_x
+        }
+        .clamp(0.0, self.max_scroll_x);
+
+        ctx.request_compose();
+        ctx.request_anim_frame();
+    }
 
     fn register_children(&mut self, ctx: &mut RegisterCtx<'_>) {
         ctx.register_child(&mut self.text);
@@ -239,10 +341,22 @@ impl Widget for TextInput {
                         TextArea::select_byte_range(&mut text_area, start, end);
                     });
                 }
+                if self.marquee_when_unfocused && !self.auto_focus {
+                    ctx.request_anim_frame();
+                }
             }
             // We check for `ChildFocusChanged` instead of `FocusChanged`
-            // because the actual widget that receives focus is the child `TextArea`
-            Update::ChildFocusChanged(_) => {
+            // because the actual widget that receives focus is the child `TextArea`.
+            Update::ChildFocusChanged(focused) => {
+                self.child_focused = *focused;
+                self.marquee_elapsed = 0.0;
+                if !focused {
+                    self.scroll_x = 0.0;
+                    if self.marquee_when_unfocused {
+                        ctx.request_anim_frame();
+                    }
+                }
+                ctx.request_layout();
                 ctx.request_paint_only();
             }
             _ => {}
@@ -263,24 +377,54 @@ impl Widget for TextInput {
         let bc = border.layout_down(bc);
         let bc = padding.layout_down(bc);
 
-        // TODO: Set minimum to deal with alignment
-        let size = ctx.run_layout(&mut self.text, &bc);
-        let baseline = ctx.child_baseline_offset(&self.text);
+        // Keep single-line text at its natural height even when the surrounding
+        // field has a fixed height. The child is centered below instead of
+        // inheriting the field's minimum height and painting from its top edge.
+        let text_bc = BoxConstraints::new(Size::new(bc.min().width, 0.0), bc.max());
+        let text_size = ctx.run_layout(&mut self.text, &text_bc);
+        let inner_size = bc.constrain(text_size);
+        let text_y = ((inner_size.height - text_size.height) * 0.5).max(0.0);
+        let baseline = ctx.child_baseline_offset(&self.text) + text_y;
 
-        let (size, baseline) = padding.layout_up(size, baseline);
+        let viewport_width = if inner_size.width.is_finite() {
+            inner_size.width.max(0.0)
+        } else {
+            text_size.width.max(0.0)
+        };
+        let (full_text_width, caret) = ctx.get_raw(&mut self.text).0.horizontal_scroll_metrics();
+        self.max_scroll_x = (full_text_width - viewport_width).max(0.0);
+        if self.max_scroll_x <= f64::EPSILON {
+            self.scroll_x = 0.0;
+        } else if self.child_focused {
+            if let Some(caret) = caret {
+                let margin = CARET_SCROLL_MARGIN.min(viewport_width * 0.25);
+                let visible_left = self.scroll_x + margin;
+                let visible_right = self.scroll_x + (viewport_width - margin).max(margin);
+                if caret.x0 < visible_left {
+                    self.scroll_x = (caret.x0 - margin).max(0.0);
+                } else if caret.x1 > visible_right {
+                    self.scroll_x = (caret.x1 - viewport_width + margin).min(self.max_scroll_x);
+                }
+            }
+        } else if !self.marquee_when_unfocused {
+            self.scroll_x = 0.0;
+        }
+        self.scroll_x = self.scroll_x.clamp(0.0, self.max_scroll_x);
+        let (size, baseline) = padding.layout_up(inner_size, baseline);
         let (size, baseline) = border.layout_up(size, baseline);
 
         let pos = Point::ORIGIN;
         let pos = border.place_down(pos);
         let pos = padding.place_down(pos);
-        ctx.place_child(&mut self.text, pos);
+        ctx.place_child(&mut self.text, pos + Vec2::new(0.0, text_y));
 
         let text_is_empty = ctx.get_raw(&mut self.text).0.is_empty();
 
         ctx.set_stashed(&mut self.placeholder, !text_is_empty);
         if text_is_empty {
-            let _ = ctx.run_layout(&mut self.placeholder, &bc);
-            ctx.place_child(&mut self.placeholder, pos);
+            let placeholder_size = ctx.run_layout(&mut self.placeholder, &text_bc);
+            let placeholder_y = ((inner_size.height - placeholder_size.height) * 0.5).max(0.0);
+            ctx.place_child(&mut self.placeholder, pos + Vec2::new(0.0, placeholder_y));
         }
 
         if shadow.is_visible() {
@@ -288,16 +432,27 @@ impl Widget for TextInput {
         }
 
         if self.clip {
-            // TODO: Ideally, this clip would be the "inside edge" of our border path
-            // In the current implementation, that would currently clip our own border
-            // and so isn't viable.
-            // The BorderColor (etc.) properties don't currently support the border
-            // being drawn in post_post, which I think would be ideal for this use case.
-            ctx.set_clip_path(Rect::from_origin_size(Point::ORIGIN, size));
+            // Clip horizontally at the content box, not merely at the border.
+            // A marquee translates the text child, so without the padding in
+            // this clip it can slide through the normal left/right inset and
+            // appear to touch or overlap the outline.
+            let inset = border.width.max(0.0);
+            let left = (inset + padding.left).min(size.width);
+            let right = (size.width - inset - padding.right).max(left);
+            ctx.set_clip_path(Rect::new(
+                left,
+                inset,
+                right,
+                (size.height - inset).max(inset),
+            ));
         }
 
         ctx.set_baseline_offset(baseline);
         size
+    }
+
+    fn compose(&mut self, ctx: &mut ComposeCtx<'_>) {
+        ctx.set_child_scroll_translation(&mut self.text, Vec2::new(-self.scroll_x, 0.0));
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx<'_>, props: &PropertiesRef<'_>, scene: &mut Scene) {

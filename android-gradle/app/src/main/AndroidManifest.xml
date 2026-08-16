@@ -11,6 +11,7 @@
     <application
         android:allowBackup="false"
         android:hasCode="true"
+        android:icon="@mipmap/ic_launcher"
         android:label="FastExplorer"
         android:theme="@style/FastExplorerTheme">
         <provider

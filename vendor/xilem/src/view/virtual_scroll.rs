@@ -18,6 +18,7 @@ pub struct VirtualScroll<State, Action, ChildrenViews, F> {
     phantom: PhantomData<fn() -> (WidgetPod<dyn Widget>, State, Action, ChildrenViews)>,
     func: F,
     valid_range: Range<i64>,
+    reset_key: u64,
 }
 
 /// A (vertical) virtual scrolling View, for Masonry's [`VirtualScroll`](widgets::VirtualScroll).
@@ -58,6 +59,7 @@ where
         phantom: PhantomData,
         func,
         valid_range,
+        reset_key: 0,
     }
 }
 
@@ -79,6 +81,18 @@ where
         phantom: PhantomData,
         func,
         valid_range: i64::MIN..i64::MAX,
+        reset_key: 0,
+    }
+}
+
+impl<State, Action, ChildrenViews, F> VirtualScroll<State, Action, ChildrenViews, F> {
+    /// Reset the scroll anchor to the beginning whenever `key` changes.
+    ///
+    /// This is useful when the same virtual list view is reused for different
+    /// backing collections, such as navigating between filesystem folders.
+    pub fn reset_on_change(mut self, key: u64) -> Self {
+        self.reset_key = key;
+        self
     }
 }
 
@@ -154,6 +168,9 @@ where
         let valid_range_changed = self.valid_range != prev.valid_range;
         if valid_range_changed {
             widgets::VirtualScroll::set_valid_range(&mut element, self.valid_range.clone());
+        }
+        if self.reset_key != prev.reset_key && !self.valid_range.is_empty() {
+            widgets::VirtualScroll::overwrite_anchor(&mut element, self.valid_range.start);
         }
         // TODO: This code should be moved into `Self::message` once it becomes possible to
         // make a build/rebuild/teardown context there.

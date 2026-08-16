@@ -641,6 +641,10 @@ impl VirtualScroll {
             PostScrollResult::Layout => ctx.request_layout(),
             PostScrollResult::NoLayout => ctx.request_compose(),
         }
+        // The scrollbar thumb depends on the continuous sub-item offset, not
+        // just the anchor index. Repaint every scroll update so it moves
+        // smoothly instead of appearing to jump once per file row.
+        ctx.request_render();
     }
 
     fn drag_scrollbar_to(

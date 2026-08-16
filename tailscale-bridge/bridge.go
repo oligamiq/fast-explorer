@@ -472,10 +472,18 @@ func extractURL(message string) string {
 }
 
 func stableHostname(stateDir string) (string, error) {
+	if data, err := os.ReadFile(filepath.Join(stateDir, "hostname")); err == nil {
+		if hostname := strings.TrimSpace(string(data)); hostname != "" {
+			return hostname, nil
+		}
+	}
 	path := filepath.Join(stateDir, "device-id")
 	if data, err := os.ReadFile(path); err == nil {
 		if id := strings.TrimSpace(string(data)); id != "" {
-			return "fastexplorer-" + id, nil
+			if len(id) > 6 {
+				id = id[:6]
+			}
+			return "fe-" + id, nil
 		}
 	}
 	var random [4]byte
@@ -486,7 +494,7 @@ func stableHostname(stateDir string) (string, error) {
 	if err := os.WriteFile(path, []byte(id+"\n"), 0o600); err != nil {
 		return "", err
 	}
-	return "fastexplorer-" + id, nil
+	return "fe-" + id[:6], nil
 }
 
 func acquireStateLock(stateDir string) (*flock.Flock, error) {

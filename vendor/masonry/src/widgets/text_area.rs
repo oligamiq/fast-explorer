@@ -252,6 +252,22 @@ impl<const EDITABLE: bool> TextArea<EDITABLE> {
 
 // --- MARK: HELPERS
 impl<const EDITABLE: bool> TextArea<EDITABLE> {
+    /// Return the laid-out full text width and current caret rectangle.
+    ///
+    /// This is used by single-line parents such as [`TextInput`] to keep the
+    /// active caret visible while the text itself is wider than the field.
+    pub(crate) fn horizontal_scroll_metrics(&self) -> (f64, Option<Rect>) {
+        let full_width = self
+            .editor
+            .try_layout()
+            .map_or(0.0, |layout| f64::from(layout.full_width()));
+        let caret = self
+            .editor
+            .cursor_geometry(1.5)
+            .map(bounding_box_to_rect);
+        (full_width, caret)
+    }
+
     /// Get the IME area from the editor, accounting for padding.
     ///
     /// This should only be called when the editor layout is available.
@@ -545,7 +561,13 @@ impl<const EDITABLE: bool> Widget for TextArea<EDITABLE> {
                 }
                 let new_generation = self.editor.generation();
                 if new_generation != self.rendered_generation {
-                    ctx.request_render();
+                    if self.word_wrap {
+                        ctx.request_render();
+                    } else {
+                        // Single-line TextInput parents use layout to update their
+                        // horizontal caret-follow scroll offset.
+                        ctx.request_layout();
+                    }
                     ctx.set_ime_area(self.ime_area());
                     self.rendered_generation = new_generation;
                 }
@@ -781,7 +803,11 @@ impl<const EDITABLE: bool> Widget for TextArea<EDITABLE> {
                         ));
                         ctx.request_layout();
                     } else {
-                        ctx.request_render();
+                        if self.word_wrap {
+                            ctx.request_render();
+                        } else {
+                            ctx.request_layout();
+                        }
                         ctx.set_ime_area(self.ime_area());
                     }
                     self.rendered_generation = new_generation;
@@ -955,7 +981,13 @@ impl<const EDITABLE: bool> Widget for TextArea<EDITABLE> {
                     .select_from_accesskit(selection);
                 let new_generation = self.editor.generation();
                 if new_generation != self.rendered_generation {
-                    ctx.request_render();
+                    if self.word_wrap {
+                        ctx.request_render();
+                    } else {
+                        // Single-line TextInput parents use layout to update their
+                        // horizontal caret-follow scroll offset.
+                        ctx.request_layout();
+                    }
                     ctx.set_ime_area(self.ime_area());
                     self.rendered_generation = new_generation;
                 }

@@ -114,13 +114,21 @@ pub fn root_view(
     #[cfg(target_os = "android")]
     let window_content = {
         let insets = state.android_insets();
+        // File content intentionally extends behind Android's navigation/gesture
+        // region. The virtual file list adds an equivalent scrollable end spacer,
+        // so every tappable row can still be moved fully above that untappable area.
+        // Settings remains fully inset because its controls are not part of that list.
+        let bottom_inset = match state.page() {
+            AppPage::Files => 0.0,
+            AppPage::Settings => insets.bottom,
+        };
         sized_box(content)
             .expand()
             .padding(Padding {
                 left: insets.left,
                 right: insets.right,
                 top: insets.top,
-                bottom: insets.bottom,
+                bottom: bottom_inset,
             })
             .background_color(palette.window)
     };

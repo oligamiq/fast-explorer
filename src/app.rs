@@ -13,7 +13,8 @@ use winit::platform::android::activity::AndroidApp;
 use xilem::masonry::peniko::ImageData;
 
 use crate::settings::{
-    AppSettings, RemoteCacheSettings, SearchMode, TailnetProfileSettings, UiFont,
+    AppSettings, PathOverflowBehavior, RemoteCacheSettings, SearchMode, TailnetProfileSettings,
+    UiFont,
 };
 use crate::theme::{AppearanceMode, ThemeColor, ThemePalette, ThemePatch, ThemeSettings};
 
@@ -683,6 +684,7 @@ impl FileEntry {
 #[derive(Debug, Clone)]
 pub struct TabState {
     id: u64,
+    scroll_generation: u64,
     pub current_dir: PathBuf,
     pub address_input: String,
     pub entries: Vec<FileEntry>,
@@ -720,6 +722,7 @@ impl TabState {
     fn from_path(current_dir: PathBuf) -> Self {
         let mut tab = Self {
             id: TAB_COUNTER.fetch_add(1, Ordering::Relaxed),
+            scroll_generation: 0,
             address_input: display_path(&current_dir),
             current_dir,
             entries: Vec::new(),
@@ -762,6 +765,7 @@ impl TabState {
         let restore_validation_pending = parse_taildrive_path(&current_dir).is_none();
         let mut tab = Self {
             id: TAB_COUNTER.fetch_add(1, Ordering::Relaxed),
+            scroll_generation: 0,
             address_input: display_path(&current_dir),
             current_dir,
             entries: Vec::new(),
@@ -810,6 +814,10 @@ impl TabState {
 
     pub(crate) fn id(&self) -> u64 {
         self.id
+    }
+
+    pub(crate) fn scroll_reset_key(&self) -> u64 {
+        self.id.rotate_left(17) ^ self.scroll_generation
     }
 
     pub fn title(&self) -> String {
@@ -1018,6 +1026,7 @@ impl TabState {
 
     fn set_current_dir(&mut self, path: PathBuf) {
         self.current_dir = path;
+        self.scroll_generation = self.scroll_generation.wrapping_add(1);
         self.address_input = display_path(&self.current_dir);
         self.restore_validation_pending = false;
         self.restore_warning = None;
@@ -1078,6 +1087,7 @@ struct SessionState {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct SavedTab {
+    #[serde(default)]
     current_dir: PathBuf,
     show_hidden: bool,
     #[serde(default)]
@@ -1165,6 +1175,39 @@ impl TailnetProfileState {
     }
 }
 
+fn generated_tailscale_hostname(profile_id: &str) -> String {
+    let mut hash = 0x811c9dc5_u32;
+    for byte in profile_id.bytes() {
+        hash ^= u32::from(byte);
+        hash = hash.wrapping_mul(0x01000193);
+    }
+    format!("fe-{:06x}", hash & 0x00ff_ffff)
+}
+
+fn normalize_tailscale_hostname(value: &str) -> String {
+    let mut normalized = String::with_capacity(value.len().min(32));
+    let mut previous_dash = false;
+    for ch in value.trim().to_ascii_lowercase().chars() {
+        let next = if ch.is_ascii_alphanumeric() { ch } else { '-' };
+        if next == '-' {
+            if previous_dash || normalized.is_empty() {
+                continue;
+            }
+            previous_dash = true;
+        } else {
+            previous_dash = false;
+        }
+        normalized.push(next);
+        if normalized.len() >= 32 {
+            break;
+        }
+    }
+    while normalized.ends_with('-') {
+        normalized.pop();
+    }
+    normalized
+}
+
 #[derive(Debug)]
 pub struct AppState {
     tabs: Vec<TabState>,
@@ -1182,6 +1225,8 @@ pub struct AppState {
     saved_ui_font: UiFont,
     remote_cache_settings: RemoteCacheSettings,
     saved_remote_cache_settings: RemoteCacheSettings,
+    path_overflow_behavior: PathOverflowBehavior,
+    path_reset_delay_ms: u32,
     remote_cache_usage_bytes: u64,
     pending_remote_cache_downloads: BTreeMap<String, PendingRemoteCacheDownload>,
     pending_upload_info: BTreeMap<String, (EntryKind, u64)>,
@@ -1200,6 +1245,8 @@ pub struct AppState {
     context_actions_visible: bool,
     pinned_paths: Vec<PathBuf>,
     tailscale_profiles: Vec<TailnetProfileState>,
+    tailscale_offline_peers_expanded: BTreeSet<String>,
+    tailscale_offline_devices_expanded: BTreeSet<String>,
     tailscale_sender: Option<tokio::sync::mpsc::UnboundedSender<crate::tailscale::Command>>,
     directory_sender: Option<tokio::sync::mpsc::UnboundedSender<DirectoryRequest>>,
     directory_generation: u64,
@@ -1273,6 +1320,8 @@ impl AppState {
         state.ui_font = saved.ui_font;
         state.remote_cache_settings = saved.remote_cache;
         state.saved_remote_cache_settings = saved.remote_cache;
+        state.path_overflow_behavior = saved.path_overflow_behavior;
+        state.path_reset_delay_ms = saved.path_reset_delay_ms.clamp(500, 10_000);
         state.confirm_mobile_delete = saved.confirm_mobile_delete;
         state.delete_warning_suppressed_until_ms = saved.delete_warning_suppressed_until_ms;
         state.pinned_paths = saved.pinned_paths.clone();
@@ -1356,6 +1405,8 @@ impl AppState {
             saved_ui_font: UiFont::System,
             remote_cache_settings: RemoteCacheSettings::default(),
             saved_remote_cache_settings: RemoteCacheSettings::default(),
+            path_overflow_behavior: PathOverflowBehavior::default(),
+            path_reset_delay_ms: 3000,
             remote_cache_usage_bytes: 0,
             pending_remote_cache_downloads: BTreeMap::new(),
             pending_upload_info: BTreeMap::new(),
@@ -1374,6 +1425,8 @@ impl AppState {
             context_actions_visible: false,
             pinned_paths: Vec::new(),
             tailscale_profiles: Vec::new(),
+            tailscale_offline_peers_expanded: BTreeSet::new(),
+            tailscale_offline_devices_expanded: BTreeSet::new(),
             tailscale_sender: None,
             directory_sender: None,
             directory_generation: 0,
@@ -1450,6 +1503,8 @@ impl AppState {
             saved_ui_font: UiFont::System,
             remote_cache_settings: RemoteCacheSettings::default(),
             saved_remote_cache_settings: RemoteCacheSettings::default(),
+            path_overflow_behavior: PathOverflowBehavior::default(),
+            path_reset_delay_ms: 3000,
             remote_cache_usage_bytes: 0,
             pending_remote_cache_downloads: BTreeMap::new(),
             pending_upload_info: BTreeMap::new(),
@@ -1468,6 +1523,8 @@ impl AppState {
             context_actions_visible: false,
             pinned_paths: Vec::new(),
             tailscale_profiles: Vec::new(),
+            tailscale_offline_peers_expanded: BTreeSet::new(),
+            tailscale_offline_devices_expanded: BTreeSet::new(),
             tailscale_sender: None,
             directory_sender: None,
             directory_generation: 0,
@@ -1563,6 +1620,8 @@ impl AppState {
             self.saved_remote_cache_settings,
             self.tailscale_profile_settings(),
         );
+        settings.path_overflow_behavior = self.path_overflow_behavior;
+        settings.path_reset_delay_ms = self.path_reset_delay_ms;
         settings.pinned_paths = self.pinned_paths.clone();
         settings.confirm_mobile_delete = self.confirm_mobile_delete;
         settings.delete_warning_suppressed_until_ms = self.delete_warning_suppressed_until_ms;
@@ -1617,6 +1676,28 @@ impl AppState {
 
     pub fn tab_count(&self) -> usize {
         self.tabs.len()
+    }
+
+    pub const fn path_overflow_behavior(&self) -> PathOverflowBehavior {
+        self.path_overflow_behavior
+    }
+
+    pub fn set_path_overflow_behavior(&mut self, behavior: PathOverflowBehavior) {
+        self.path_overflow_behavior = behavior;
+        self.persist_settings();
+    }
+
+    pub const fn path_reset_delay_ms(&self) -> u32 {
+        self.path_reset_delay_ms
+    }
+
+    pub fn set_path_reset_delay_ms(&mut self, delay_ms: u32) {
+        self.path_reset_delay_ms = delay_ms.clamp(500, 10_000);
+        self.persist_settings();
+    }
+
+    pub fn file_scroll_reset_key(&self) -> u64 {
+        self.active_tab().scroll_reset_key()
     }
 
     pub fn page(&self) -> AppPage {
@@ -1753,6 +1834,81 @@ impl AppState {
             .find(|profile| profile.config.id == profile_id)
     }
 
+    fn tailscale_profile_hostname_value(profile: &TailnetProfileState) -> String {
+        let configured = normalize_tailscale_hostname(&profile.config.hostname);
+        if configured.is_empty() {
+            generated_tailscale_hostname(&profile.config.id)
+        } else {
+            configured
+        }
+    }
+
+    pub fn tailscale_profile_hostname(&self, profile_id: &str) -> String {
+        self.tailscale_profile(profile_id)
+            .map(Self::tailscale_profile_hostname_value)
+            .unwrap_or_default()
+    }
+
+    pub fn set_tailnet_label(&mut self, profile_id: &str, value: String) {
+        let value = value.chars().take(40).collect::<String>();
+        if value.trim().is_empty() {
+            return;
+        }
+        if let Some(profile) = self.tailscale_profile_mut(profile_id) {
+            profile.config.label = value;
+            self.persist_settings();
+        }
+    }
+
+    pub fn set_tailnet_hostname(&mut self, profile_id: &str, value: String) {
+        let hostname = normalize_tailscale_hostname(&value);
+        if let Some(profile) = self.tailscale_profile_mut(profile_id) {
+            profile.config.hostname = hostname;
+            self.persist_settings();
+            let effective = self.tailscale_profile_hostname(profile_id);
+            let _ = crate::tailscale::save_hostname(profile_id, &effective);
+        }
+    }
+
+    pub fn apply_tailnet_hostname(&mut self, profile_id: &str, value: String) {
+        self.set_tailnet_hostname(profile_id, value);
+        let hostname = self.tailscale_profile_hostname(profile_id);
+        let enabled = self
+            .tailscale_profile(profile_id)
+            .is_some_and(|profile| profile.config.enabled);
+        let Some(sender) = self.tailscale_sender.clone() else {
+            return;
+        };
+        if enabled {
+            let _ = sender.send(crate::tailscale::Command::Restart {
+                profile_id: profile_id.to_owned(),
+                hostname,
+            });
+        }
+    }
+
+    pub fn tailscale_offline_peers_expanded(&self, profile_id: &str) -> bool {
+        self.tailscale_offline_peers_expanded.contains(profile_id)
+    }
+
+    pub fn toggle_tailscale_offline_peers(&mut self, profile_id: &str) {
+        if !self.tailscale_offline_peers_expanded.remove(profile_id) {
+            self.tailscale_offline_peers_expanded
+                .insert(profile_id.to_owned());
+        }
+    }
+
+    pub fn tailscale_offline_devices_expanded(&self, profile_id: &str) -> bool {
+        self.tailscale_offline_devices_expanded.contains(profile_id)
+    }
+
+    pub fn toggle_tailscale_offline_devices(&mut self, profile_id: &str) {
+        if !self.tailscale_offline_devices_expanded.remove(profile_id) {
+            self.tailscale_offline_devices_expanded
+                .insert(profile_id.to_owned());
+        }
+    }
+
     pub fn install_tailscale_sender(
         &mut self,
         sender: tokio::sync::mpsc::UnboundedSender<crate::tailscale::Command>,
@@ -1762,6 +1918,7 @@ impl AppState {
             if profile.config.enabled {
                 let _ = sender.send(crate::tailscale::Command::Start {
                     profile_id: profile.config.id.clone(),
+                    hostname: Self::tailscale_profile_hostname_value(profile),
                 });
             }
         }
@@ -1794,22 +1951,27 @@ impl AppState {
         while self
             .tailscale_profiles
             .iter()
-            .any(|profile| profile.config.label == format!("Tailnet {number}"))
+            .any(|profile| profile.config.label == format!("TN{number}"))
         {
             number += 1;
         }
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
-            .as_nanos();
-        let id = format!("tailnet-{}-{nonce}", std::process::id());
-        let mut config = TailnetProfileSettings::new(id.clone(), format!("Tailnet {number}"));
+            .as_nanos() as u64;
+        let short_id = ((nonce >> 32) ^ nonce) as u32;
+        let id = format!("tn-{short_id:08x}");
+        let mut config = TailnetProfileSettings::new(id.clone(), format!("TN{number}"));
+        config.hostname = generated_tailscale_hostname(&id);
         config.enabled = true;
         self.tailscale_profiles
             .push(TailnetProfileState::from_config(config));
         self.persist_settings();
         if let Some(sender) = &self.tailscale_sender {
-            let _ = sender.send(crate::tailscale::Command::Start { profile_id: id });
+            let _ = sender.send(crate::tailscale::Command::Start {
+                hostname: generated_tailscale_hostname(&id),
+                profile_id: id,
+            });
         }
     }
 
@@ -1862,6 +2024,7 @@ impl AppState {
                 if profile.config.enabled && !was_enabled {
                     let _ = sender.send(crate::tailscale::Command::Start {
                         profile_id: profile.config.id.clone(),
+                        hostname: Self::tailscale_profile_hostname_value(profile),
                     });
                 }
             }
@@ -1891,9 +2054,11 @@ impl AppState {
             profile.ping_status.clear();
         }
         self.persist_settings();
+        let hostname = self.tailscale_profile_hostname(profile_id);
         if let Some(sender) = &self.tailscale_sender {
             let _ = sender.send(crate::tailscale::Command::Start {
                 profile_id: profile_id.to_owned(),
+                hostname,
             });
         }
     }
@@ -3469,6 +3634,8 @@ impl AppState {
         self.ui_font = saved.ui_font;
         self.remote_cache_settings = saved.remote_cache;
         self.saved_remote_cache_settings = saved.remote_cache;
+        self.path_overflow_behavior = saved.path_overflow_behavior;
+        self.path_reset_delay_ms = saved.path_reset_delay_ms.clamp(500, 10_000);
         self.confirm_mobile_delete = saved.confirm_mobile_delete;
         self.delete_warning_suppressed_until_ms = saved.delete_warning_suppressed_until_ms;
         self.refresh_remote_cache_usage();
@@ -7299,6 +7466,8 @@ mod tests {
             saved_ui_font: UiFont::System,
             remote_cache_settings: RemoteCacheSettings::default(),
             saved_remote_cache_settings: RemoteCacheSettings::default(),
+            path_overflow_behavior: PathOverflowBehavior::default(),
+            path_reset_delay_ms: 3000,
             remote_cache_usage_bytes: 0,
             pending_remote_cache_downloads: BTreeMap::new(),
             pending_upload_info: BTreeMap::new(),
@@ -7317,6 +7486,8 @@ mod tests {
             context_actions_visible: false,
             pinned_paths: Vec::new(),
             tailscale_profiles: Vec::new(),
+            tailscale_offline_peers_expanded: BTreeSet::new(),
+            tailscale_offline_devices_expanded: BTreeSet::new(),
             tailscale_sender: None,
             directory_sender: None,
             directory_generation: 0,
@@ -7707,8 +7878,8 @@ mod tests {
             app.tailscale_profiles[0].config.id,
             app.tailscale_profiles[1].config.id
         );
-        assert_eq!(app.tailscale_profiles[0].config.label, "Tailnet 1");
-        assert_eq!(app.tailscale_profiles[1].config.label, "Tailnet 2");
+        assert_eq!(app.tailscale_profiles[0].config.label, "TN1");
+        assert_eq!(app.tailscale_profiles[1].config.label, "TN2");
         let removed = app.tailscale_profiles[0].config.id.clone();
         app.remove_tailnet_profile(&removed);
         app.add_tailnet_profile();
@@ -8193,61 +8364,9 @@ mod tests {
         second_tab.sort_field = SortField::DateModified;
         second_tab.sort_direction = SortDirection::Ascending;
         second_tab.navigate_to(nested.clone());
-        let app = AppState {
-            tabs: vec![first_tab, second_tab],
-            active_tab: 1,
-            page: AppPage::Files,
-            persistence_enabled: false,
-            persistence_sender: None,
-            theme_settings: ThemeSettings::default(),
-            saved_theme_settings: ThemeSettings::default(),
-            theme_overrides: ThemePatch::default(),
-            search_mode: SearchMode::Default,
-            saved_search_mode: SearchMode::Default,
-            search_override: None,
-            ui_font: UiFont::System,
-            saved_ui_font: UiFont::System,
-            remote_cache_settings: RemoteCacheSettings::default(),
-            saved_remote_cache_settings: RemoteCacheSettings::default(),
-            remote_cache_usage_bytes: 0,
-            pending_remote_cache_downloads: BTreeMap::new(),
-            pending_upload_info: BTreeMap::new(),
-            pending_temporary_uploads: BTreeSet::new(),
-            file_clipboard: None,
-            pending_delete_confirmation: None,
-            pending_paste_conflict: None,
-            paste_conflict_resolution: None,
-            confirm_mobile_delete: true,
-            delete_warning_suppressed_until_ms: 0,
-            file_transfers: Vec::new(),
-            transfer_popup_open: false,
-            sort_popup_open: false,
-            file_more_popup_open: false,
-            system_dark: false,
-            context_actions_visible: false,
-            pinned_paths: Vec::new(),
-            tailscale_profiles: Vec::new(),
-            tailscale_sender: None,
-            directory_sender: None,
-            directory_generation: 0,
-            directory_request_started_at: None,
-            archive_sender: None,
-            archive_generation: 0,
-            local_file_sender: None,
-            cache_sender: None,
-            remote_prepare_sender: None,
-            remote_prepare_pending: BTreeSet::new(),
-            remote_cache_usage_pending: None,
-            remote_cache_usage_next_request_id: 0,
-            remote_cache_usage_refresh_queued: false,
-            thumbnail_sender: None,
-            thumbnail_cache: BTreeMap::new(),
-            thumbnail_pending: BTreeSet::new(),
-            search_sender: None,
-            search_generation: 0,
-            taildrive_generation: 0,
-            remote_mutations: Vec::new(),
-        };
+        let mut app = app_at(first.clone());
+        app.tabs = vec![first_tab, second_tab];
+        app.active_tab = 1;
         app.save_session_to(&session_file).expect("save session");
 
         let restored = AppState::load_session_from(&session_file).expect("restore session");
@@ -8328,6 +8447,37 @@ mod tests {
         let warning = restored.restore_warning().expect("restore warning");
         assert!(warning.contains("gone"));
         assert!(warning.contains("opened"));
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn tailscale_hostnames_are_short_stable_and_normalized() {
+        let generated = generated_tailscale_hostname("tailnet-very-long-internal-profile-id");
+        assert!(generated.starts_with("fe-"));
+        assert_eq!(generated.len(), 9);
+        assert_eq!(
+            generated,
+            generated_tailscale_hostname("tailnet-very-long-internal-profile-id")
+        );
+        assert_eq!(
+            normalize_tailscale_hostname("  My Fast Explorer!!  "),
+            "my-fast-explorer"
+        );
+        assert_eq!(
+            normalize_tailscale_hostname("---WORK__PHONE---"),
+            "work-phone"
+        );
+    }
+
+    #[test]
+    fn directory_change_changes_virtual_scroll_reset_key() {
+        let root = sandbox();
+        let nested = root.join("nested");
+        fs::create_dir_all(&nested).expect("nested");
+        let mut tab = TabState::from_path(root.clone());
+        let before = tab.scroll_reset_key();
+        tab.set_current_dir(nested);
+        assert_ne!(before, tab.scroll_reset_key());
         fs::remove_dir_all(root).expect("cleanup");
     }
 
