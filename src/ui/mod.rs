@@ -28,7 +28,7 @@ use crate::theme::Layout;
 use components::{
     address_bar, delete_confirmation_overlay, file_action_bar, file_area, file_more_overlay,
     paste_conflict_overlay, restore_warning_banner, settings_page, sort_overlay, tab_bar,
-    transfer_popup,
+    tab_group_overlay, transfer_popup,
 };
 #[cfg(not(target_os = "android"))]
 use components::{sidebar, status_bar};
@@ -92,6 +92,7 @@ pub fn root_view(
         .background_color(palette.window);
     let content = zstack((
         app_content,
+        tab_group_overlay(state).alignment(UnitPoint::TOP_LEFT),
         transfer_popup(state).alignment(UnitPoint::TOP_RIGHT),
         sort_overlay(state).alignment(UnitPoint::TOP_RIGHT),
         file_more_overlay(state).alignment(UnitPoint::TOP_RIGHT),

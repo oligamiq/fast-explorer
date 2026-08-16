@@ -22,6 +22,7 @@ const SESSION_VERSION: u32 = 1;
 const TRANSFER_HISTORY_LIMIT: usize = 32;
 static TRANSFER_COUNTER: AtomicU64 = AtomicU64::new(1);
 static TAB_COUNTER: AtomicU64 = AtomicU64::new(1);
+static TAB_GROUP_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 pub type SearchRequest = (u64, PathBuf, String, SearchMode, bool);
 pub type DirectoryRequest = (u64, PathBuf, bool);
@@ -478,6 +479,72 @@ impl SortDirection {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TabGroupColor {
+    #[default]
+    Grey,
+    Blue,
+    Red,
+    Yellow,
+    Green,
+    Pink,
+    Purple,
+    Cyan,
+    Orange,
+}
+
+impl TabGroupColor {
+    pub const ALL: [Self; 9] = [
+        Self::Grey,
+        Self::Blue,
+        Self::Red,
+        Self::Yellow,
+        Self::Green,
+        Self::Pink,
+        Self::Purple,
+        Self::Cyan,
+        Self::Orange,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Grey => "Grey",
+            Self::Blue => "Blue",
+            Self::Red => "Red",
+            Self::Yellow => "Yellow",
+            Self::Green => "Green",
+            Self::Pink => "Pink",
+            Self::Purple => "Purple",
+            Self::Cyan => "Cyan",
+            Self::Orange => "Orange",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TabGroupState {
+    id: u64,
+    name: String,
+    color: TabGroupColor,
+    collapsed: bool,
+}
+
+impl TabGroupState {
+    pub const fn id(&self) -> u64 {
+        self.id
+    }
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    pub const fn color(&self) -> TabGroupColor {
+        self.color
+    }
+    pub const fn collapsed(&self) -> bool {
+        self.collapsed
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct FileEntry {
     pub path: PathBuf,
@@ -684,6 +751,7 @@ impl FileEntry {
 #[derive(Debug, Clone)]
 pub struct TabState {
     id: u64,
+    group_id: Option<u64>,
     scroll_generation: u64,
     pub current_dir: PathBuf,
     pub address_input: String,
@@ -722,6 +790,7 @@ impl TabState {
     fn from_path(current_dir: PathBuf) -> Self {
         let mut tab = Self {
             id: TAB_COUNTER.fetch_add(1, Ordering::Relaxed),
+            group_id: None,
             scroll_generation: 0,
             address_input: display_path(&current_dir),
             current_dir,
@@ -765,6 +834,7 @@ impl TabState {
         let restore_validation_pending = parse_taildrive_path(&current_dir).is_none();
         let mut tab = Self {
             id: TAB_COUNTER.fetch_add(1, Ordering::Relaxed),
+            group_id: saved.group_id,
             scroll_generation: 0,
             address_input: display_path(&current_dir),
             current_dir,
@@ -803,6 +873,7 @@ impl TabState {
 
     fn saved(&self) -> SavedTab {
         SavedTab {
+            group_id: self.group_id,
             current_dir: self.current_dir.clone(),
             show_hidden: self.show_hidden,
             sort_field: self.sort_field,
@@ -814,6 +885,10 @@ impl TabState {
 
     pub(crate) fn id(&self) -> u64 {
         self.id
+    }
+
+    pub const fn group_id(&self) -> Option<u64> {
+        self.group_id
     }
 
     pub(crate) fn scroll_reset_key(&self) -> u64 {
@@ -1083,10 +1158,14 @@ struct SessionState {
     version: u32,
     active_tab: usize,
     tabs: Vec<SavedTab>,
+    #[serde(default)]
+    tab_groups: Vec<TabGroupState>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct SavedTab {
+    #[serde(default)]
+    group_id: Option<u64>,
     #[serde(default)]
     current_dir: PathBuf,
     show_hidden: bool,
@@ -1212,6 +1291,10 @@ fn normalize_tailscale_hostname(value: &str) -> String {
 pub struct AppState {
     tabs: Vec<TabState>,
     active_tab: usize,
+    tab_groups: Vec<TabGroupState>,
+    tab_context_menu_tab_id: Option<u64>,
+    tab_group_editor_id: Option<u64>,
+    tab_overlay_anchor_x: f64,
     page: AppPage,
     persistence_enabled: bool,
     persistence_sender: Option<tokio::sync::mpsc::UnboundedSender<PersistCommand>>,
@@ -1392,6 +1475,10 @@ impl AppState {
         Self {
             tabs: vec![TabState::default()],
             active_tab: 0,
+            tab_groups: Vec::new(),
+            tab_context_menu_tab_id: None,
+            tab_group_editor_id: None,
+            tab_overlay_anchor_x: 8.0,
             page: AppPage::Files,
             persistence_enabled: true,
             persistence_sender: None,
@@ -1481,15 +1568,36 @@ impl AppState {
         if session.version != SESSION_VERSION || session.tabs.is_empty() {
             return None;
         }
-        let tabs = session
-            .tabs
+        let SessionState {
+            version: _,
+            active_tab: saved_active_tab,
+            tabs: saved_tabs,
+            tab_groups,
+        } = session;
+        let valid_groups = tab_groups
+            .iter()
+            .map(|group| group.id)
+            .collect::<BTreeSet<_>>();
+        let mut tabs = saved_tabs
             .into_iter()
             .map(TabState::from_saved)
             .collect::<Vec<_>>();
-        let active_tab = session.active_tab.min(tabs.len() - 1);
+        for tab in &mut tabs {
+            if tab.group_id.is_some_and(|id| !valid_groups.contains(&id)) {
+                tab.group_id = None;
+            }
+        }
+        if let Some(max_id) = tab_groups.iter().map(|group| group.id).max() {
+            TAB_GROUP_COUNTER.fetch_max(max_id.saturating_add(1), Ordering::Relaxed);
+        }
+        let active_tab = saved_active_tab.min(tabs.len() - 1);
         let state = Self {
             tabs,
             active_tab,
+            tab_groups,
+            tab_context_menu_tab_id: None,
+            tab_group_editor_id: None,
+            tab_overlay_anchor_x: 8.0,
             page: AppPage::Files,
             persistence_enabled: true,
             persistence_sender: None,
@@ -1572,6 +1680,7 @@ impl AppState {
             version: SESSION_VERSION,
             active_tab: self.active_tab,
             tabs: self.tabs.iter().map(TabState::saved).collect(),
+            tab_groups: self.tab_groups.clone(),
         }
     }
 
@@ -1654,6 +1763,95 @@ impl AppState {
         &self.tabs
     }
 
+    pub fn tab_groups(&self) -> &[TabGroupState] {
+        &self.tab_groups
+    }
+
+    pub fn tab_group(&self, group_id: u64) -> Option<&TabGroupState> {
+        self.tab_groups.iter().find(|group| group.id == group_id)
+    }
+
+    pub fn tab_context_menu_tab_id(&self) -> Option<u64> {
+        self.tab_context_menu_tab_id
+    }
+
+    pub fn tab_group_editor_id(&self) -> Option<u64> {
+        self.tab_group_editor_id
+    }
+
+    pub fn tab_overlay_anchor_x(&self) -> f64 {
+        self.tab_overlay_anchor_x
+    }
+
+    pub fn open_tab_context_menu_at(&mut self, tab_id: u64, anchor_x: f64) {
+        self.tab_overlay_anchor_x = anchor_x.max(8.0);
+        self.open_tab_context_menu(tab_id);
+    }
+
+    pub fn open_tab_context_menu(&mut self, tab_id: u64) {
+        if self.tabs.iter().any(|tab| tab.id == tab_id) {
+            self.file_more_popup_open = false;
+            self.sort_popup_open = false;
+            self.transfer_popup_open = false;
+            self.tab_group_editor_id = None;
+            self.tab_context_menu_tab_id = Some(tab_id);
+        }
+    }
+
+    pub fn close_tab_overlays(&mut self) {
+        self.tab_context_menu_tab_id = None;
+        self.tab_group_editor_id = None;
+    }
+
+    pub fn open_tab_group_editor_at(&mut self, group_id: u64, anchor_x: f64) {
+        self.tab_overlay_anchor_x = anchor_x.max(8.0);
+        self.open_tab_group_editor(group_id);
+    }
+
+    pub fn open_tab_group_editor(&mut self, group_id: u64) {
+        if self.tab_groups.iter().any(|group| group.id == group_id) {
+            self.file_more_popup_open = false;
+            self.sort_popup_open = false;
+            self.transfer_popup_open = false;
+            self.tab_context_menu_tab_id = None;
+            self.tab_group_editor_id = Some(group_id);
+        }
+    }
+
+    pub fn toggle_tab_group_collapsed(&mut self, group_id: u64) {
+        if let Some(group) = self
+            .tab_groups
+            .iter_mut()
+            .find(|group| group.id == group_id)
+        {
+            group.collapsed = !group.collapsed;
+            self.close_tab_overlays();
+            self.persist_session();
+        }
+    }
+
+    pub fn set_tab_group_name(&mut self, group_id: u64, value: String) {
+        if let Some(group) = self
+            .tab_groups
+            .iter_mut()
+            .find(|group| group.id == group_id)
+        {
+            group.name = value.chars().take(48).collect();
+            self.persist_session();
+        }
+    }
+
+    pub fn set_tab_group_color(&mut self, group_id: u64, color: TabGroupColor) {
+        if let Some(group) = self
+            .tab_groups
+            .iter_mut()
+            .find(|group| group.id == group_id)
+        {
+            group.color = color;
+            self.persist_session();
+        }
+    }
+
     pub fn active_tab_index(&self) -> usize {
         self.active_tab
     }
@@ -1705,6 +1903,7 @@ impl AppState {
     }
 
     pub fn open_settings(&mut self) {
+        self.close_tab_overlays();
         self.file_more_popup_open = false;
         self.sort_popup_open = false;
         // Opening Settings is an explicit retry point. A previous worker response may
@@ -3104,6 +3303,10 @@ impl AppState {
             self.cancel_rename();
             return false;
         }
+        if self.tab_context_menu_tab_id.is_some() || self.tab_group_editor_id.is_some() {
+            self.close_tab_overlays();
+            return false;
+        }
         if self.transfer_popup_open {
             self.close_transfer_popup();
             return false;
@@ -3689,11 +3892,42 @@ impl AppState {
     }
 
     pub fn new_tab(&mut self) {
+        self.close_tab_overlays();
         self.tabs.push(TabState::default());
         self.active_tab = self.tabs.len() - 1;
         self.page = AppPage::Files;
         self.request_directory_reload();
         self.persist_mobile_browsing_state();
+    }
+
+    pub fn new_tab_in_group(&mut self, group_id: u64) {
+        if self.tab_group(group_id).is_none() {
+            return;
+        }
+        let active_id = self.active_tab().id;
+        let mut tab = TabState::default();
+        let new_id = tab.id;
+        tab.group_id = Some(group_id);
+        let insert_at = self
+            .tabs
+            .iter()
+            .rposition(|tab| tab.group_id == Some(group_id))
+            .map_or(self.tabs.len(), |index| index + 1);
+        self.tabs.insert(insert_at, tab);
+        self.active_tab = self
+            .tabs
+            .iter()
+            .position(|tab| tab.id == new_id)
+            .unwrap_or_else(|| {
+                self.tabs
+                    .iter()
+                    .position(|tab| tab.id == active_id)
+                    .unwrap_or(0)
+            });
+        self.page = AppPage::Files;
+        self.close_tab_overlays();
+        self.request_directory_reload();
+        self.persist_session();
     }
 
     pub(crate) fn select_tab_by_id(&mut self, tab_id: u64) {
@@ -3706,22 +3940,206 @@ impl AppState {
         let Some(from) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
             return;
         };
-        let target = target.min(self.tabs.len().saturating_sub(1));
+        let mut target = target.min(self.tabs.len().saturating_sub(1));
+        let source_group = self.tabs[from].group_id;
+        if let Some(group_id) = source_group {
+            let first = self
+                .tabs
+                .iter()
+                .position(|tab| tab.group_id == Some(group_id))
+                .unwrap_or(from);
+            let last = self
+                .tabs
+                .iter()
+                .rposition(|tab| tab.group_id == Some(group_id))
+                .unwrap_or(from);
+            target = target.clamp(first, last);
+        } else if let Some(target_group) = self.tabs.get(target).and_then(|tab| tab.group_id) {
+            let first = self
+                .tabs
+                .iter()
+                .position(|tab| tab.group_id == Some(target_group))
+                .unwrap_or(target);
+            let last = self
+                .tabs
+                .iter()
+                .rposition(|tab| tab.group_id == Some(target_group))
+                .unwrap_or(target);
+            target = if from < first { last } else { first };
+        }
         if target == from {
             return;
         }
 
         let active_id = self.active_tab().id;
         let tab = self.tabs.remove(from);
-        self.tabs.insert(target, tab);
+        self.tabs.insert(target.min(self.tabs.len()), tab);
         if let Some(active_index) = self.tabs.iter().position(|tab| tab.id == active_id) {
             self.active_tab = active_index;
         }
+        self.close_tab_overlays();
         self.persist_session();
+    }
+
+    pub fn create_tab_group_for_tab(&mut self, tab_id: u64) {
+        let Some(tab_index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
+            return;
+        };
+        let old_group = self.tabs[tab_index].group_id;
+        let group_id = TAB_GROUP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let color = TabGroupColor::ALL[self.tab_groups.len() % TabGroupColor::ALL.len()];
+        self.tab_groups.push(TabGroupState {
+            id: group_id,
+            name: "Group".to_owned(),
+            color,
+            collapsed: false,
+        });
+
+        if let Some(old_group_id) = old_group {
+            let active_id = self.active_tab().id;
+            let mut tab = self.tabs.remove(tab_index);
+            tab.group_id = Some(group_id);
+            let insert_at = self
+                .tabs
+                .iter()
+                .rposition(|tab| tab.group_id == Some(old_group_id))
+                .map_or(tab_index.min(self.tabs.len()), |index| index + 1);
+            self.tabs.insert(insert_at, tab);
+            self.active_tab = self
+                .tabs
+                .iter()
+                .position(|tab| tab.id == active_id)
+                .unwrap_or(0);
+        } else {
+            self.tabs[tab_index].group_id = Some(group_id);
+        }
+        self.remove_empty_tab_group(old_group);
+        self.tab_context_menu_tab_id = None;
+        self.tab_group_editor_id = Some(group_id);
+        self.persist_session();
+    }
+
+    pub fn assign_tab_to_group(&mut self, tab_id: u64, group_id: u64) {
+        if self.tab_group(group_id).is_none() {
+            return;
+        }
+        let Some(from) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
+            return;
+        };
+        let old_group = self.tabs[from].group_id;
+        if old_group == Some(group_id) {
+            self.close_tab_overlays();
+            return;
+        }
+        let active_id = self.active_tab().id;
+        let mut tab = self.tabs.remove(from);
+        tab.group_id = Some(group_id);
+        let insert_at = self
+            .tabs
+            .iter()
+            .rposition(|tab| tab.group_id == Some(group_id))
+            .map_or(self.tabs.len(), |index| index + 1);
+        self.tabs.insert(insert_at, tab);
+        self.active_tab = self
+            .tabs
+            .iter()
+            .position(|tab| tab.id == active_id)
+            .unwrap_or(0);
+        self.remove_empty_tab_group(old_group);
+        self.close_tab_overlays();
+        self.persist_session();
+    }
+
+    pub fn remove_tab_from_group(&mut self, tab_id: u64) {
+        let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
+            return;
+        };
+        let Some(old_group) = self.tabs[index].group_id else {
+            self.close_tab_overlays();
+            return;
+        };
+        let active_id = self.active_tab().id;
+        let mut tab = self.tabs.remove(index);
+        tab.group_id = None;
+        let insert_at = self
+            .tabs
+            .iter()
+            .rposition(|tab| tab.group_id == Some(old_group))
+            .map_or(index.min(self.tabs.len()), |group_last| group_last + 1);
+        self.tabs.insert(insert_at, tab);
+        self.active_tab = self
+            .tabs
+            .iter()
+            .position(|tab| tab.id == active_id)
+            .unwrap_or(0);
+        self.remove_empty_tab_group(Some(old_group));
+        self.close_tab_overlays();
+        self.persist_session();
+    }
+
+    pub fn ungroup_tab_group(&mut self, group_id: u64) {
+        for tab in &mut self.tabs {
+            if tab.group_id == Some(group_id) {
+                tab.group_id = None;
+            }
+        }
+        self.tab_groups.retain(|group| group.id != group_id);
+        self.close_tab_overlays();
+        self.persist_session();
+    }
+
+    /// Returns true when closing this group should close the whole application.
+    pub fn close_tab_group(&mut self, group_id: u64) -> bool {
+        let group_tab_count = self
+            .tabs
+            .iter()
+            .filter(|tab| tab.group_id == Some(group_id))
+            .count();
+        if group_tab_count == 0 {
+            self.close_tab_overlays();
+            return false;
+        }
+        if group_tab_count == self.tabs.len() {
+            self.persist_session();
+            return true;
+        }
+
+        let active_id = self.active_tab().id;
+        let active_was_in_group = self.active_tab().group_id == Some(group_id);
+        self.tabs.retain(|tab| tab.group_id != Some(group_id));
+        self.tab_groups.retain(|group| group.id != group_id);
+        if !active_was_in_group {
+            self.active_tab = self
+                .tabs
+                .iter()
+                .position(|tab| tab.id == active_id)
+                .unwrap_or(0);
+        } else {
+            self.active_tab = self.active_tab.min(self.tabs.len() - 1);
+            if self.active_tab().entries.is_empty() {
+                self.request_directory_reload();
+            }
+        }
+        self.close_tab_overlays();
+        self.persist_session();
+        false
+    }
+
+    fn remove_empty_tab_group(&mut self, group_id: Option<u64>) {
+        let Some(group_id) = group_id else {
+            return;
+        };
+        if !self.tabs.iter().any(|tab| tab.group_id == Some(group_id)) {
+            self.tab_groups.retain(|group| group.id != group_id);
+            if self.tab_group_editor_id == Some(group_id) {
+                self.tab_group_editor_id = None;
+            }
+        }
     }
 
     pub fn select_tab(&mut self, index: usize) {
         if index < self.tabs.len() {
+            self.close_tab_overlays();
             self.active_tab = index;
             self.page = AppPage::Files;
             if let Some(location) =
@@ -3746,13 +4164,21 @@ impl AppState {
             self.persist_session();
             return true;
         }
+        let active_id = self.active_tab().id;
+        let removed_group = self.tabs[index].group_id;
+        let removed_id = self.tabs[index].id;
         self.tabs.remove(index);
-        if self.active_tab > index {
-            self.active_tab -= 1;
-        } else if self.active_tab >= self.tabs.len() {
-            self.active_tab = self.tabs.len() - 1;
+        self.active_tab = self
+            .tabs
+            .iter()
+            .position(|tab| tab.id == active_id)
+            .unwrap_or_else(|| index.min(self.tabs.len() - 1));
+        if self.tab_context_menu_tab_id == Some(removed_id) {
+            self.tab_context_menu_tab_id = None;
         }
+        self.remove_empty_tab_group(removed_group);
         self.persist_mobile_browsing_state();
+        self.persist_session();
         false
     }
 
@@ -5201,6 +5627,7 @@ impl AppState {
     }
 
     pub fn open_sort_popup(&mut self) {
+        self.close_tab_overlays();
         self.file_more_popup_open = false;
         self.sort_popup_open = true;
     }
@@ -5239,6 +5666,7 @@ impl AppState {
 
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     pub fn toggle_file_more_popup(&mut self) {
+        self.close_tab_overlays();
         self.file_more_popup_open = !self.file_more_popup_open;
         if self.file_more_popup_open {
             self.sort_popup_open = false;
@@ -5292,6 +5720,7 @@ impl AppState {
 
     pub fn toggle_transfer_popup(&mut self) {
         if !self.file_transfers.is_empty() {
+            self.close_tab_overlays();
             self.transfer_popup_open = !self.transfer_popup_open;
         }
     }
@@ -7453,6 +7882,10 @@ mod tests {
         AppState {
             tabs: vec![TabState::from_path(path)],
             active_tab: 0,
+            tab_groups: Vec::new(),
+            tab_context_menu_tab_id: None,
+            tab_group_editor_id: None,
+            tab_overlay_anchor_x: 8.0,
             page: AppPage::Files,
             persistence_enabled: false,
             persistence_sender: None,
@@ -8264,6 +8697,12 @@ mod tests {
         assert!(!app.handle_system_back());
         assert!(!app.file_more_popup_open());
 
+        let tab_id = app.active_tab().id();
+        app.open_tab_context_menu(tab_id);
+        assert_eq!(app.tab_context_menu_tab_id(), Some(tab_id));
+        assert!(!app.handle_system_back());
+        assert!(app.tab_context_menu_tab_id().is_none());
+
         app.open_settings();
         assert!(!app.handle_system_back());
         assert_eq!(app.page(), AppPage::Files);
@@ -8321,6 +8760,56 @@ mod tests {
     }
 
     #[test]
+    fn tab_group_membership_stays_contiguous_and_empty_groups_are_removed() {
+        let root = sandbox();
+        let first = root.join("first");
+        let second = root.join("second");
+        let third = root.join("third");
+        let fourth = root.join("fourth");
+        fs::create_dir_all(&first).expect("first");
+        fs::create_dir_all(&second).expect("second");
+        fs::create_dir_all(&third).expect("third");
+        fs::create_dir_all(&fourth).expect("fourth");
+
+        let mut app = app_at(first);
+        app.tabs.push(tab_at(second));
+        app.tabs.push(tab_at(third));
+        app.tabs.push(tab_at(fourth));
+        let first_id = app.tabs[0].id();
+        let second_id = app.tabs[1].id();
+        let third_id = app.tabs[2].id();
+
+        app.create_tab_group_for_tab(first_id);
+        let group_id = app.tabs[0].group_id().expect("group id");
+        app.assign_tab_to_group(second_id, group_id);
+        app.assign_tab_to_group(third_id, group_id);
+        assert!(
+            app.tabs[..3]
+                .iter()
+                .all(|tab| tab.group_id() == Some(group_id))
+        );
+
+        // Removing a middle member must move it outside the group instead of
+        // splitting the remaining group into two visual islands.
+        app.remove_tab_from_group(second_id);
+        assert_eq!(app.tabs[0].group_id(), Some(group_id));
+        assert_eq!(app.tabs[1].group_id(), Some(group_id));
+        assert_eq!(app.tabs[2].id(), second_id);
+        assert_eq!(app.tabs[2].group_id(), None);
+
+        app.move_tab_to_index(first_id, 3);
+        assert_eq!(app.tabs[0].group_id(), Some(group_id));
+        assert_eq!(app.tabs[1].group_id(), Some(group_id));
+        assert!(app.tabs[2..].iter().all(|tab| tab.group_id().is_none()));
+
+        app.remove_tab_from_group(first_id);
+        app.remove_tab_from_group(third_id);
+        assert!(app.tab_group(group_id).is_none());
+        assert!(app.tabs().iter().all(|tab| tab.group_id().is_none()));
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
     fn tab_add_switch_and_close_preserves_state() {
         let root = sandbox();
         let first = root.join("first");
@@ -8347,6 +8836,32 @@ mod tests {
     }
 
     #[test]
+    fn closing_group_with_all_tabs_requests_app_exit() {
+        let root = sandbox();
+        let first = root.join("first");
+        let second = root.join("second");
+        fs::create_dir_all(&first).expect("first");
+        fs::create_dir_all(&second).expect("second");
+
+        let mut app = app_at(first);
+        app.tabs.push(tab_at(second));
+        let first_id = app.tabs[0].id();
+        let second_id = app.tabs[1].id();
+        app.create_tab_group_for_tab(first_id);
+        let group_id = app.tabs[0].group_id().expect("group id");
+        app.assign_tab_to_group(second_id, group_id);
+
+        assert!(app.close_tab_group(group_id));
+        assert_eq!(app.tab_count(), 2);
+        assert!(
+            app.tabs()
+                .iter()
+                .all(|tab| tab.group_id() == Some(group_id))
+        );
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
     fn session_round_trip_restores_tabs_history_and_active_tab() {
         let root = sandbox();
         let first = root.join("first");
@@ -8367,6 +8882,14 @@ mod tests {
         let mut app = app_at(first.clone());
         app.tabs = vec![first_tab, second_tab];
         app.active_tab = 1;
+        let first_id = app.tabs[0].id();
+        let second_id = app.tabs[1].id();
+        app.create_tab_group_for_tab(first_id);
+        let group_id = app.tabs[0].group_id().expect("group id");
+        app.assign_tab_to_group(second_id, group_id);
+        app.set_tab_group_name(group_id, "Research".to_owned());
+        app.set_tab_group_color(group_id, TabGroupColor::Purple);
+        app.toggle_tab_group_collapsed(group_id);
         app.save_session_to(&session_file).expect("save session");
 
         let restored = AppState::load_session_from(&session_file).expect("restore session");
@@ -8382,6 +8905,16 @@ mod tests {
             SortDirection::Ascending
         );
         assert_eq!(restored.active_tab().current_dir, nested);
+        let restored_group = restored.tab_group(group_id).expect("restored group");
+        assert_eq!(restored_group.name(), "Research");
+        assert_eq!(restored_group.color(), TabGroupColor::Purple);
+        assert!(restored_group.collapsed());
+        assert!(
+            restored
+                .tabs()
+                .iter()
+                .all(|tab| tab.group_id() == Some(group_id))
+        );
         assert!(restored.can_go_back());
         fs::remove_dir_all(root).expect("cleanup");
     }
@@ -8427,6 +8960,7 @@ mod tests {
             version: SESSION_VERSION,
             active_tab: 0,
             tabs: vec![SavedTab {
+                group_id: None,
                 current_dir: missing,
                 show_hidden: true,
                 sort_field: SortField::Name,
@@ -8434,6 +8968,7 @@ mod tests {
                 back_stack: Vec::new(),
                 forward_stack: Vec::new(),
             }],
+            tab_groups: Vec::new(),
         };
         fs::write(
             &session_file,
