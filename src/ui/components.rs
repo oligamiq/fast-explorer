@@ -23,8 +23,8 @@ use super::tab_drag::{TabDragConfig, tab_drag_button};
 use super::window_chrome::{CaptionButtonKind, caption_button, drag_region};
 use super::window_chrome::{NavigationButtonKind, navigation_button};
 use crate::app::{
-    AppState, EntryKind, FileCategory, FileEntry, SortDirection, SortField, TaildriveLocation,
-    parse_taildrive_path, taildrive_path,
+    AppState, EntryKind, FileCategory, FileEntry, SortDirection, SortField, TabGroupColor,
+    TabGroupState, TaildriveLocation, parse_taildrive_path, taildrive_path,
 };
 use crate::settings::{PathOverflowBehavior, SearchMode, UiFont};
 use crate::theme::{AppearanceMode, Layout, ThemeColor, ThemePalette};
@@ -37,11 +37,106 @@ fn compact_tab_width(title: &str, min_width: f64, max_width: f64) -> f64 {
     (label_width + Layout::TAB_CLOSE_WIDTH + 18.0).clamp(min_width, max_width)
 }
 
+fn compact_group_width(name: &str) -> f64 {
+    let label = if name.trim().is_empty() {
+        "Group"
+    } else {
+        name
+    };
+    let label_width = label
+        .chars()
+        .map(|ch| if ch.is_ascii() { 7.0 } else { 12.5 })
+        .sum::<f64>();
+    // Reserve room for the color dot, label padding, and the separate edit button.
+    (label_width + 88.0).clamp(96.0, 210.0)
+}
+
+fn tab_group_color(color: TabGroupColor) -> Color {
+    match color {
+        TabGroupColor::Grey => Color::from_rgb8(112, 112, 112),
+        TabGroupColor::Blue => Color::from_rgb8(50, 115, 220),
+        TabGroupColor::Red => Color::from_rgb8(210, 67, 67),
+        TabGroupColor::Yellow => Color::from_rgb8(205, 157, 27),
+        TabGroupColor::Green => Color::from_rgb8(46, 139, 87),
+        TabGroupColor::Pink => Color::from_rgb8(210, 83, 151),
+        TabGroupColor::Purple => Color::from_rgb8(132, 83, 201),
+        TabGroupColor::Cyan => Color::from_rgb8(22, 151, 177),
+        TabGroupColor::Orange => Color::from_rgb8(214, 108, 36),
+    }
+}
+
+fn tab_group_header(
+    group: TabGroupState,
+    width: f64,
+    anchor_x: f64,
+    palette: ThemePalette,
+) -> impl WidgetView<AppState> {
+    let group_id = group.id();
+    let color = tab_group_color(group.color());
+    let display_name = if group.name().trim().is_empty() {
+        "Group".to_owned()
+    } else {
+        group.name().to_owned()
+    };
+    let dot = sized_box(label(""))
+        .width(10.px())
+        .height(10.px())
+        .background_color(color)
+        .corner_radius(5.0);
+    let content = flex_row((
+        dot,
+        FlexSpacer::Fixed(6.px()),
+        sized_box(
+            prose(display_name)
+                .line_break_mode(LineBreaking::Clip)
+                .text_size(12.0)
+                .text_color(palette.text),
+        )
+        .flex(1.0),
+    ))
+    .gap(0.px())
+    .cross_axis_alignment(CrossAxisAlignment::Center);
+    let collapse = sized_box(
+        button(content, move |state: &mut AppState| {
+            state.toggle_tab_group_collapsed(group_id)
+        })
+        .padding(Padding::from_vh(5.0, 8.0))
+        .background_color(palette.tab_inactive)
+        .active_background_color(palette.accent_soft)
+        .border(color, 1.0)
+        .hovered_border_color(color)
+        .corner_radius(Layout::RADIUS),
+    )
+    .flex(1.0);
+    let edit_id = group.id();
+    let edit = icon_button(
+        LucideIcon::Ellipsis,
+        "Edit tab group",
+        false,
+        move |state| state.open_tab_group_editor_at(edit_id, anchor_x),
+        palette,
+    );
+    sized_box(
+        flex_row((collapse, edit))
+            .gap(2.px())
+            .cross_axis_alignment(CrossAxisAlignment::Center),
+    )
+    .width(width.px())
+    .height(Layout::TOOL_HEIGHT.px())
+    .padding(Padding::horizontal(2.0))
+}
+
 fn tab_strip_views(
     state: &AppState,
     min_tab_width: f64,
     palette: ThemePalette,
 ) -> (Vec<Box<AnyWidgetView<AppState>>>, f64, Option<Rect>) {
+    #[derive(Clone, Copy)]
+    enum Slot {
+        Group(u64, f64),
+        Tab(usize, f64),
+    }
+
     let tab_count = state.tab_count().max(1);
     let active = state.active_tab_index();
     let max_tab_width =
@@ -51,45 +146,115 @@ fn tab_strip_views(
         .iter()
         .map(|tab| tab.title())
         .collect::<Vec<_>>();
-    let ids = state.tabs().iter().map(|tab| tab.id()).collect::<Vec<_>>();
     let widths = titles
         .iter()
         .map(|title| compact_tab_width(title, min_tab_width, max_tab_width))
         .collect::<Vec<_>>();
-    let drop_targets = (0..titles.len()).collect::<Vec<_>>();
-    let total_width = widths.iter().sum::<f64>();
 
-    let mut x = 0.0;
-    let mut reveal_target = None;
-    for (index, width) in widths.iter().copied().enumerate() {
-        if index == active {
-            reveal_target = Some(Rect::new(x, 0.0, x + width, Layout::TOOL_HEIGHT));
-            break;
+    let mut slots = Vec::new();
+    let mut seen_groups = Vec::new();
+    for (index, tab) in state.tabs().iter().enumerate() {
+        if let Some(group_id) = tab.group_id() {
+            if !seen_groups.contains(&group_id) {
+                seen_groups.push(group_id);
+                if let Some(group) = state.tab_group(group_id) {
+                    slots.push(Slot::Group(group_id, compact_group_width(group.name())));
+                }
+            }
+            if state
+                .tab_group(group_id)
+                .is_some_and(TabGroupState::collapsed)
+            {
+                continue;
+            }
         }
-        x += width;
+        slots.push(Slot::Tab(index, widths[index]));
     }
 
-    let views = titles
-        .into_iter()
-        .enumerate()
-        .map(|(index, title)| {
-            tab_item(
-                TabItemSpec {
-                    index,
-                    drag_index: index,
-                    drop_targets: drop_targets.clone(),
-                    tab_id: ids[index],
-                    title,
-                    active: index == active,
-                    width: widths[index],
-                    widths: widths.clone(),
-                    scroll_leading: 0.0,
-                },
-                palette,
-            )
-            .boxed()
+    let visible_indices = slots
+        .iter()
+        .filter_map(|slot| match slot {
+            Slot::Tab(index, _) => Some(*index),
+            Slot::Group(_, _) => None,
         })
         .collect::<Vec<_>>();
+    let visible_widths = visible_indices
+        .iter()
+        .map(|index| widths[*index])
+        .collect::<Vec<_>>();
+    let mut tab_centers = Vec::with_capacity(visible_indices.len());
+    let mut x = 0.0;
+    let mut reveal_target = None;
+    for slot in &slots {
+        match *slot {
+            Slot::Group(group_id, width) => {
+                if state
+                    .tabs()
+                    .get(active)
+                    .is_some_and(|tab| tab.group_id() == Some(group_id))
+                    && state
+                        .tab_group(group_id)
+                        .is_some_and(TabGroupState::collapsed)
+                {
+                    reveal_target = Some(Rect::new(x, 0.0, x + width, Layout::TOOL_HEIGHT));
+                }
+                x += width;
+            }
+            Slot::Tab(index, width) => {
+                tab_centers.push(x + width * 0.5);
+                if index == active {
+                    reveal_target = Some(Rect::new(x, 0.0, x + width, Layout::TOOL_HEIGHT));
+                }
+                x += width;
+            }
+        }
+    }
+    let total_width = x;
+
+    let ids = state.tabs().iter().map(|tab| tab.id()).collect::<Vec<_>>();
+    let drop_targets = visible_indices.clone();
+    let mut views: Vec<Box<AnyWidgetView<AppState>>> = Vec::new();
+    let mut slot_x = 8.0;
+    for slot in slots {
+        match slot {
+            Slot::Group(group_id, width) => {
+                if let Some(group) = state.tab_group(group_id).cloned() {
+                    views.push(tab_group_header(group, width, slot_x, palette).boxed());
+                }
+                slot_x += width;
+            }
+            Slot::Tab(index, width) => {
+                let drag_index = visible_indices
+                    .iter()
+                    .position(|visible| *visible == index)
+                    .unwrap_or(0);
+                let group_color = state.tabs()[index]
+                    .group_id()
+                    .and_then(|group_id| state.tab_group(group_id))
+                    .map(|group| tab_group_color(group.color()));
+                views.push(
+                    tab_item(
+                        TabItemSpec {
+                            index,
+                            drag_index,
+                            drop_targets: drop_targets.clone(),
+                            tab_id: ids[index],
+                            title: titles[index].clone(),
+                            active: index == active,
+                            width,
+                            widths: visible_widths.clone(),
+                            centers: tab_centers.clone(),
+                            scroll_leading: 0.0,
+                            group_color,
+                        },
+                        palette,
+                    )
+                    .boxed(),
+                );
+                slot_x += width;
+            }
+        }
+    }
 
     (views, total_width, reveal_target)
 }
@@ -2552,7 +2717,9 @@ struct TabItemSpec {
     active: bool,
     width: f64,
     widths: Vec<f64>,
+    centers: Vec<f64>,
     scroll_leading: f64,
+    group_color: Option<Color>,
 }
 
 fn tab_item(spec: TabItemSpec, palette: ThemePalette) -> impl WidgetView<AppState> {
@@ -2565,7 +2732,9 @@ fn tab_item(spec: TabItemSpec, palette: ThemePalette) -> impl WidgetView<AppStat
         active,
         width: tab_width,
         widths: tab_widths,
+        centers: tab_centers,
         scroll_leading,
+        group_color,
     } = spec;
     let background = if active {
         palette.tab_active
@@ -2586,11 +2755,11 @@ fn tab_item(spec: TabItemSpec, palette: ThemePalette) -> impl WidgetView<AppStat
     .expand_width()
     .padding(Padding::from_vh(5.0, 5.0));
     let close = tab_close_button(index, true, palette);
-    let border_color = if active {
+    let border_color = group_color.unwrap_or(if active {
         palette.border_strong
     } else {
         palette.border
-    };
+    });
     let surface = sized_box(
         flex_row((sized_box(content).flex(1.0), close))
             .gap(0.px())
@@ -2607,6 +2776,7 @@ fn tab_item(spec: TabItemSpec, palette: ThemePalette) -> impl WidgetView<AppStat
             source_index: index,
             drag_index,
             tab_widths,
+            tab_centers,
             drop_targets,
             scroll_leading,
             drag_handle_right_inset: Layout::TAB_CLOSE_WIDTH,
@@ -2985,6 +3155,296 @@ fn menu_item_button(
     )
     .height(36.px())
     .expand_width()
+}
+
+fn tab_popup_button(
+    text: String,
+    marker: Option<Color>,
+    selected: bool,
+    callback: impl Fn(&mut AppState) + Send + Sync + 'static,
+    palette: ThemePalette,
+) -> impl WidgetView<AppState> {
+    let marker_color = marker.unwrap_or(Color::TRANSPARENT);
+    let marker_border = marker.unwrap_or(Color::TRANSPARENT);
+    let marker_view = sized_box(label(""))
+        .width(10.px())
+        .height(10.px())
+        .background_color(marker_color)
+        .border(marker_border, 1.0)
+        .corner_radius(5.0);
+    let content = flex_row((
+        marker_view,
+        FlexSpacer::Fixed(9.px()),
+        label(text).text_size(13.0).color(palette.text),
+        FlexSpacer::Flex(1.0),
+    ))
+    .gap(0.px())
+    .cross_axis_alignment(CrossAxisAlignment::Center);
+    let background = if selected {
+        palette.accent_soft
+    } else {
+        palette.surface
+    };
+    sized_box(
+        button(content, callback)
+            .padding(Padding::from_vh(6.0, 9.0))
+            .background_color(background)
+            .active_background_color(palette.accent_soft)
+            .border(Color::TRANSPARENT, 1.0)
+            .hovered_border_color(palette.border_strong)
+            .corner_radius(Layout::RADIUS),
+    )
+    .height(36.px())
+    .expand_width()
+}
+
+fn tab_group_color_button(
+    group_id: u64,
+    color: TabGroupColor,
+    selected: bool,
+    palette: ThemePalette,
+) -> impl WidgetView<AppState> {
+    let swatch = tab_group_color(color);
+    let dot = zstack((
+        sized_box(label(""))
+            .width(18.px())
+            .height(18.px())
+            .background_color(swatch)
+            .corner_radius(9.0),
+        icon(LucideIcon::Square, Color::TRANSPARENT, 1.0, color.label()),
+    ));
+    let border = if selected {
+        palette.text
+    } else {
+        Color::TRANSPARENT
+    };
+    sized_box(
+        button(dot, move |state: &mut AppState| {
+            state.set_tab_group_color(group_id, color)
+        })
+        .padding(5.0)
+        .background_color(Color::TRANSPARENT)
+        .active_background_color(palette.accent_soft)
+        .border(border, 1.0)
+        .hovered_border_color(palette.border_strong)
+        .corner_radius(15.0),
+    )
+    .width(28.px())
+    .height(32.px())
+}
+
+fn tab_group_editor_card(
+    _state: &AppState,
+    group: TabGroupState,
+    palette: ThemePalette,
+) -> Box<AnyWidgetView<AppState>> {
+    let group_id = group.id();
+    let change_id = group_id;
+    let enter_id = group_id;
+    let name_input = settings_text_input(
+        group.name().to_owned(),
+        "Group name",
+        move |state, value| state.set_tab_group_name(change_id, value),
+        move |state, value| state.set_tab_group_name(enter_id, value),
+        palette,
+    );
+    let colors = TabGroupColor::ALL
+        .into_iter()
+        .map(|color| tab_group_color_button(group_id, color, color == group.color(), palette))
+        .collect::<Vec<_>>();
+    let new_tab_id = group_id;
+    let ungroup_id = group_id;
+    let close_id = group_id;
+    let card = sized_box(
+        flex_col((
+            sized_box(name_input).height(36.px()).expand_width(),
+            FlexSpacer::Fixed(8.px()),
+            sized_box(portal(
+                flex_row(colors)
+                    .gap(2.px())
+                    .cross_axis_alignment(CrossAxisAlignment::Center),
+            ))
+            .height(36.px())
+            .expand_width(),
+            FlexSpacer::Fixed(8.px()),
+            tab_popup_button(
+                "New tab in group".to_owned(),
+                None,
+                false,
+                move |state| state.new_tab_in_group(new_tab_id),
+                palette,
+            ),
+            tab_popup_button(
+                "Ungroup".to_owned(),
+                None,
+                false,
+                move |state| state.ungroup_tab_group(ungroup_id),
+                palette,
+            ),
+            tab_popup_button(
+                "Close group".to_owned(),
+                None,
+                false,
+                move |state| {
+                    if state.close_tab_group(close_id) {
+                        crate::ipc::cleanup_owned_socket();
+                        std::process::exit(0);
+                    }
+                },
+                palette,
+            ),
+        ))
+        .gap(0.px())
+        .cross_axis_alignment(CrossAxisAlignment::Start),
+    )
+    .padding(8.0)
+    .background_color(palette.surface)
+    .border(palette.border_strong, 1.0)
+    .corner_radius(8.0);
+    #[cfg(target_os = "android")]
+    let card = sized_box(card).width(_state.mobile_overlay_width(300.0).px());
+    #[cfg(not(target_os = "android"))]
+    let card = sized_box(card).width(300.px());
+    card.boxed()
+}
+
+fn tab_context_card(
+    state: &AppState,
+    tab_id: u64,
+    palette: ThemePalette,
+) -> Option<Box<AnyWidgetView<AppState>>> {
+    let tab_index = state.tabs().iter().position(|tab| tab.id() == tab_id)?;
+    let current_group = state.tabs()[tab_index].group_id();
+    let mut items: Vec<Box<AnyWidgetView<AppState>>> = Vec::new();
+    items.push(
+        label("Add tab to group")
+            .text_size(11.0)
+            .color(palette.muted)
+            .boxed(),
+    );
+    let new_group_tab_id = tab_id;
+    items.push(
+        tab_popup_button(
+            "New group".to_owned(),
+            Some(palette.accent),
+            false,
+            move |state| state.create_tab_group_for_tab(new_group_tab_id),
+            palette,
+        )
+        .boxed(),
+    );
+    for group in state.tab_groups() {
+        let group_id = group.id();
+        let row_tab_id = tab_id;
+        let name = if group.name().trim().is_empty() {
+            "Group".to_owned()
+        } else {
+            group.name().to_owned()
+        };
+        items.push(
+            tab_popup_button(
+                name,
+                Some(tab_group_color(group.color())),
+                current_group == Some(group_id),
+                move |state| state.assign_tab_to_group(row_tab_id, group_id),
+                palette,
+            )
+            .boxed(),
+        );
+    }
+    if current_group.is_some() {
+        let remove_id = tab_id;
+        items.push(sized_box(label("")).height(5.px()).boxed());
+        items.push(
+            tab_popup_button(
+                "Remove from group".to_owned(),
+                None,
+                false,
+                move |state| state.remove_tab_from_group(remove_id),
+                palette,
+            )
+            .boxed(),
+        );
+    }
+    items.push(sized_box(label("")).height(5.px()).boxed());
+    items.push(
+        tab_popup_button(
+            "Close tab".to_owned(),
+            None,
+            false,
+            move |state| {
+                if state.close_tab(tab_index) {
+                    crate::ipc::cleanup_owned_socket();
+                    std::process::exit(0);
+                }
+            },
+            palette,
+        )
+        .boxed(),
+    );
+
+    let card = sized_box(
+        flex_col(items)
+            .gap(2.px())
+            .cross_axis_alignment(CrossAxisAlignment::Start),
+    )
+    .padding(8.0)
+    .background_color(palette.surface)
+    .border(palette.border_strong, 1.0)
+    .corner_radius(8.0);
+    #[cfg(target_os = "android")]
+    let card = sized_box(card).width(state.mobile_overlay_width(280.0).px());
+    #[cfg(not(target_os = "android"))]
+    let card = sized_box(card).width(280.px());
+    Some(card.boxed())
+}
+
+pub fn tab_group_overlay(state: &AppState) -> impl WidgetView<AppState> + use<> {
+    let palette = state.palette();
+    let card = if let Some(group_id) = state.tab_group_editor_id() {
+        state
+            .tab_group(group_id)
+            .cloned()
+            .map(|group| tab_group_editor_card(state, group, palette))
+    } else if let Some(tab_id) = state.tab_context_menu_tab_id() {
+        tab_context_card(state, tab_id, palette)
+    } else {
+        None
+    };
+    let Some(card) = card else {
+        return Either::A(sized_box(label("")).width(0.px()).height(0.px()));
+    };
+
+    let backdrop = sized_box(
+        button(label(""), AppState::close_tab_overlays)
+            .background_color(Color::TRANSPARENT)
+            .active_background_color(Color::TRANSPARENT)
+            .border_color(Color::TRANSPARENT),
+    )
+    .expand();
+    #[cfg(target_os = "android")]
+    let anchor_x = 8.0;
+    #[cfg(not(target_os = "android"))]
+    let anchor_x = state
+        .tab_overlay_anchor_x()
+        .clamp(8.0, Layout::TAB_STRIP_MAX - 12.0);
+    let popup_row = flex_row((
+        FlexSpacer::Fixed(anchor_x.px()),
+        card,
+        FlexSpacer::Flex(1.0),
+    ))
+    .gap(0.px())
+    .cross_axis_alignment(CrossAxisAlignment::Start);
+    let anchored = sized_box(
+        flex_col((
+            FlexSpacer::Fixed((Layout::TAB_HEIGHT + 4.0).px()),
+            popup_row,
+        ))
+        .gap(0.px())
+        .cross_axis_alignment(CrossAxisAlignment::Start),
+    )
+    .expand_width();
+    Either::B(sized_box(zstack((backdrop, anchored.alignment(UnitPoint::TOP_LEFT)))).expand())
 }
 
 fn file_menu_top_offset() -> f64 {

@@ -24,6 +24,10 @@ const TOUCH_SCROLL_THRESHOLD: f64 = 10.0;
 const TOUCH_DRAG_HOLD_NS: u64 = 350_000_000;
 const HIDDEN_DRAG_CHILD_X: f64 = -100_000.0;
 
+fn touch_hold_elapsed(down_time_ns: u64, current_time_ns: u64) -> bool {
+    current_time_ns.saturating_sub(down_time_ns) >= TOUCH_DRAG_HOLD_NS
+}
+
 struct DragLayerRoot {
     child: WidgetPod<dyn Widget>,
     child_size: Size,
@@ -104,18 +108,11 @@ fn drag_layer_widget(
     NewWidget::new(DragLayerRoot::new(tab, Size::new(width, height))).erased()
 }
 
-fn tab_drop_target_index(widths: &[f64], source_index: usize, drag_offset: f64) -> usize {
-    if widths.is_empty() {
+fn tab_drop_target_index(centers: &[f64], source_index: usize, drag_offset: f64) -> usize {
+    if centers.is_empty() {
         return 0;
     }
-    let source_index = source_index.min(widths.len() - 1);
-    let mut centers = Vec::with_capacity(widths.len());
-    let mut cursor = 0.0;
-    for width in widths.iter().copied() {
-        centers.push(cursor + width * 0.5);
-        cursor += width;
-    }
-
+    let source_index = source_index.min(centers.len() - 1);
     let source_center = centers[source_index];
     let dragged_center = source_center + drag_offset;
     let mut target = source_index;
@@ -142,6 +139,7 @@ fn tab_drop_target_index(widths: &[f64], source_index: usize, drag_offset: f64) 
 #[derive(Debug)]
 pub(super) enum TabDragAction {
     Select(u64),
+    OpenMenu { tab_id: u64, anchor_x: f64 },
     Drop { tab_id: u64, target_index: usize },
 }
 
@@ -151,6 +149,7 @@ pub(super) struct TabDragConfig {
     pub source_index: usize,
     pub drag_index: usize,
     pub tab_widths: Vec<f64>,
+    pub tab_centers: Vec<f64>,
     pub drop_targets: Vec<usize>,
     pub scroll_leading: f64,
     pub drag_handle_right_inset: f64,
@@ -238,6 +237,9 @@ where
                 Some(action) => {
                     match *action {
                         TabDragAction::Select(tab_id) => state.select_tab_by_id(tab_id),
+                        TabDragAction::OpenMenu { tab_id, anchor_x } => {
+                            state.open_tab_context_menu_at(tab_id, anchor_x)
+                        }
                         TabDragAction::Drop {
                             tab_id,
                             target_index,
@@ -302,6 +304,7 @@ impl TabDragWidget {
                     || this.widget.config.source_index != config.source_index
                     || this.widget.config.drag_index != config.drag_index
                     || this.widget.config.tab_widths != config.tab_widths
+                    || this.widget.config.tab_centers != config.tab_centers
                     || this.widget.config.drop_targets != config.drop_targets
                     || (this.widget.config.scroll_leading - config.scroll_leading).abs()
                         > f64::EPSILON);
@@ -322,7 +325,7 @@ impl TabDragWidget {
 
     fn drop_target_index(&self) -> usize {
         let visible_target = tab_drop_target_index(
-            &self.config.tab_widths,
+            &self.config.tab_centers,
             self.config.drag_index,
             self.drag_offset_x,
         );
@@ -355,6 +358,20 @@ impl Widget for TabDragWidget {
     ) {
         match event {
             PointerEvent::Down(PointerButtonEvent {
+                button: Some(PointerButton::Secondary),
+                state,
+                ..
+            }) => {
+                self.clear_drag();
+                let local = ctx.local_position(state.position);
+                let anchor_x = ctx.to_window(local).x;
+                ctx.submit_action::<TabDragAction>(TabDragAction::OpenMenu {
+                    tab_id: self.config.tab_id,
+                    anchor_x,
+                });
+                ctx.set_handled();
+            }
+            PointerEvent::Down(PointerButtonEvent {
                 button,
                 pointer,
                 state,
@@ -380,7 +397,7 @@ impl Widget for TabDragWidget {
                 self.drag_origin_window = ctx.to_window(Point::ORIGIN);
                 self.drag_offset_x = 0.0;
                 self.pending_touch = pointer.pointer_type == PointerType::Touch;
-                self.touch_down_time_ns = 0;
+                self.touch_down_time_ns = if self.pending_touch { state.time } else { 0 };
                 self.touch_drag_armed = !self.pending_touch;
                 self.touch_scroll_started = false;
             }
@@ -394,8 +411,7 @@ impl Widget for TabDragWidget {
                     // frames. If the user moved before the long-press deadline,
                     // the parent Portal owns the horizontal swipe. If they held
                     // long enough first, the very next move begins tab dragging.
-                    let held_ns = current.time.saturating_sub(self.touch_down_time_ns);
-                    if held_ns >= TOUCH_DRAG_HOLD_NS {
+                    if touch_hold_elapsed(self.touch_down_time_ns, current.time) {
                         self.touch_drag_armed = true;
                     } else {
                         if offset.abs() >= TOUCH_SCROLL_THRESHOLD {
@@ -448,15 +464,25 @@ impl Widget for TabDragWidget {
                 ctx.request_compose();
                 ctx.request_render();
             }
-            PointerEvent::Up(PointerButtonEvent { pointer, .. })
+            PointerEvent::Up(PointerButtonEvent { pointer, state, .. })
                 if self.drag_pointer == pointer.pointer_id =>
             {
                 let Some(tab_id) = self.drag_tab_id else {
                     let should_select = !self.pending_touch || !self.touch_scroll_started;
+                    let open_touch_menu = self.pending_touch
+                        && !self.touch_scroll_started
+                        && touch_hold_elapsed(self.touch_down_time_ns, state.time);
                     let tab_id = self.config.tab_id;
+                    let local = ctx.local_position(state.position);
+                    let anchor_x = ctx.to_window(local).x;
                     self.clear_drag();
                     ctx.release_pointer();
-                    if should_select {
+                    if open_touch_menu {
+                        ctx.submit_action::<TabDragAction>(TabDragAction::OpenMenu {
+                            tab_id,
+                            anchor_x,
+                        });
+                    } else if should_select {
                         ctx.submit_action::<TabDragAction>(TabDragAction::Select(tab_id));
                     }
                     return;
@@ -504,8 +530,17 @@ impl Widget for TabDragWidget {
         _props: &mut PropertiesMut<'_>,
         event: &AccessEvent,
     ) {
-        if event.action == Action::Click {
-            ctx.submit_action::<TabDragAction>(TabDragAction::Select(self.config.tab_id));
+        match event.action {
+            Action::Click => {
+                ctx.submit_action::<TabDragAction>(TabDragAction::Select(self.config.tab_id));
+            }
+            Action::ShowContextMenu => {
+                ctx.submit_action::<TabDragAction>(TabDragAction::OpenMenu {
+                    tab_id: self.config.tab_id,
+                    anchor_x: 8.0,
+                });
+            }
+            _ => {}
         }
     }
     fn update(&mut self, ctx: &mut UpdateCtx<'_>, _props: &mut PropertiesMut<'_>, event: &Update) {
@@ -560,6 +595,7 @@ impl Widget for TabDragWidget {
         node.set_label(self.config.accessibility_label.clone());
         node.set_selected(self.config.selected);
         node.add_action(Action::Click);
+        node.add_action(Action::ShowContextMenu);
     }
 
     fn register_children(&mut self, ctx: &mut RegisterCtx<'_>) {
@@ -584,23 +620,30 @@ impl Widget for TabDragWidget {
 
 #[cfg(test)]
 mod tests {
-    use super::tab_drop_target_index;
+    use super::{TOUCH_DRAG_HOLD_NS, tab_drop_target_index, touch_hold_elapsed};
+
+    #[test]
+    fn touch_hold_uses_relative_input_timestamp() {
+        let down = 9_000_000_000_u64;
+        assert!(!touch_hold_elapsed(down, down + TOUCH_DRAG_HOLD_NS - 1));
+        assert!(touch_hold_elapsed(down, down + TOUCH_DRAG_HOLD_NS));
+    }
 
     #[test]
     fn drag_reorders_only_after_crossing_neighbor_center() {
-        let widths = [100.0, 200.0, 80.0];
+        let centers = [50.0, 200.0, 340.0];
 
-        assert_eq!(tab_drop_target_index(&widths, 1, -149.0), 1);
-        assert_eq!(tab_drop_target_index(&widths, 1, -151.0), 0);
-        assert_eq!(tab_drop_target_index(&widths, 1, 139.0), 1);
-        assert_eq!(tab_drop_target_index(&widths, 1, 141.0), 2);
+        assert_eq!(tab_drop_target_index(&centers, 1, -149.0), 1);
+        assert_eq!(tab_drop_target_index(&centers, 1, -151.0), 0);
+        assert_eq!(tab_drop_target_index(&centers, 1, 139.0), 1);
+        assert_eq!(tab_drop_target_index(&centers, 1, 141.0), 2);
     }
 
     #[test]
     fn slight_left_drag_does_not_immediately_reorder() {
-        let widths = [100.0, 200.0, 80.0];
-        assert_eq!(tab_drop_target_index(&widths, 2, -1.0), 2);
-        assert_eq!(tab_drop_target_index(&widths, 2, -139.0), 2);
-        assert_eq!(tab_drop_target_index(&widths, 2, -141.0), 1);
+        let centers = [50.0, 200.0, 340.0];
+        assert_eq!(tab_drop_target_index(&centers, 2, -1.0), 2);
+        assert_eq!(tab_drop_target_index(&centers, 2, -139.0), 2);
+        assert_eq!(tab_drop_target_index(&centers, 2, -141.0), 1);
     }
 }
