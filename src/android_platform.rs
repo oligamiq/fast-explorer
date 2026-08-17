@@ -11,6 +11,7 @@ use winit::platform::android::activity::{AndroidApp, WindowManagerFlags};
 
 static BACK_REQUESTED: AtomicBool = AtomicBool::new(false);
 static ACTIVITY_RESUMED: AtomicBool = AtomicBool::new(false);
+static SYNC_NOTIFICATION_OPENED: AtomicBool = AtomicBool::new(false);
 static DOCUMENTS_FILES_DIR: OnceLock<PathBuf> = OnceLock::new();
 static DOCUMENTS_SHARE_ROOT: OnceLock<PathBuf> = OnceLock::new();
 
@@ -36,6 +37,18 @@ pub extern "system" fn Java_dev_oligami_fastexplorer_FastExplorerActivity_native
     _class: jni::sys::jclass,
 ) {
     ACTIVITY_RESUMED.store(false, Ordering::Release);
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_oligami_fastexplorer_FastExplorerActivity_nativeSyncNotificationOpened(
+    _env: *mut jni::sys::JNIEnv,
+    _class: jni::sys::jclass,
+) {
+    SYNC_NOTIFICATION_OPENED.store(true, Ordering::Release);
+}
+
+pub(crate) fn take_sync_notification_opened() -> bool {
+    SYNC_NOTIFICATION_OPENED.swap(false, Ordering::AcqRel)
 }
 
 pub(crate) fn take_back_request() -> bool {
@@ -239,6 +252,94 @@ pub(crate) fn share_file(app: &AndroidApp, path: &std::path::Path) -> Result<(),
             .then_some(())
             .ok_or_else(|| "no Android share target is available".to_owned())
     })
+}
+
+pub(crate) fn set_clipboard_text(app: &AndroidApp, text: &str) -> Result<(), String> {
+    with_jni(app, |env, activity| {
+        let text = env.new_string(text)?;
+        env.call_method(
+            activity,
+            jni_str!("setFastExplorerClipboardText"),
+            jni_sig!("(Ljava/lang/String;)V"),
+            &[JValue::Object(text.as_ref())],
+        )?;
+        Ok(())
+    })
+}
+
+pub(crate) fn clipboard_text(app: &AndroidApp) -> Result<String, String> {
+    with_jni(app, |env, activity| {
+        let value = env
+            .call_method(
+                activity,
+                jni_str!("getFastExplorerClipboardText"),
+                jni_sig!("()Ljava/lang/String;"),
+                &[],
+            )?
+            .l()?;
+        let value = env.cast_local::<JString>(value)?;
+        value.try_to_string(env)
+    })
+}
+
+pub(crate) fn fcm_token(app: &AndroidApp) -> Result<String, String> {
+    with_jni(app, |env, activity| {
+        let value = env
+            .call_method(
+                activity,
+                jni_str!("getFastExplorerFcmToken"),
+                jni_sig!("()Ljava/lang/String;"),
+                &[],
+            )?
+            .l()?;
+        let value = env.cast_local::<JString>(value)?;
+        value.try_to_string(env)
+    })
+}
+
+pub(crate) fn ensure_notification_permission(app: &AndroidApp) -> Result<(), String> {
+    let ui_app = app.clone();
+    app.run_on_java_main_thread(Box::new(move || {
+        if let Err(error) = with_jni(&ui_app, |env, activity| {
+            env.call_method(
+                activity,
+                jni_str!("ensureFastExplorerNotificationPermission"),
+                jni_sig!("()V"),
+                &[],
+            )?;
+            Ok(())
+        }) {
+            eprintln!("FastExplorer: cannot request notification permission: {error}");
+        }
+    }));
+    Ok(())
+}
+
+pub(crate) fn notify_incoming_sync(
+    app: &AndroidApp,
+    title: String,
+    detail: String,
+) -> Result<(), String> {
+    let ui_app = app.clone();
+    app.run_on_java_main_thread(Box::new(move || {
+        if let Err(error) = with_jni(&ui_app, |env, activity| {
+            let title = env.new_string(&title)?;
+            let detail = env.new_string(&detail)?;
+            env.call_method(
+                activity,
+                jni_str!("notifyFastExplorerIncomingSync"),
+                jni_sig!("(Ljava/lang/String;Ljava/lang/String;)V"),
+                &[
+                    JValue::Object(title.as_ref()),
+                    JValue::Object(detail.as_ref()),
+                ],
+            )?;
+            Ok(())
+        }) {
+            eprintln!("FastExplorer: cannot show incoming sync notification: {error}");
+        }
+    }));
+    Ok(())
 }
 
 pub(crate) fn local_day_end_unix_ms(app: &AndroidApp) -> Result<u64, String> {

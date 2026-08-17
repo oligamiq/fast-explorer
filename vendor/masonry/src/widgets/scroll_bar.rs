@@ -8,7 +8,7 @@ use vello::kurbo::{Point, Rect, Size};
 
 use crate::core::{
     AccessCtx, AccessEvent, AllowRawMut, Axis, BoxConstraints, ChildrenIds, EventCtx, LayoutCtx,
-    NoAction, PaintCtx, PointerButtonEvent, PointerEvent, PointerUpdate, PropertiesMut,
+    NoAction, PaintCtx, PointerButton, PointerButtonEvent, PointerEvent, PointerUpdate, PropertiesMut,
     PropertiesRef, RegisterCtx, TextEvent, Update, UpdateCtx, Widget, WidgetId, WidgetMut,
 };
 use crate::theme;
@@ -30,6 +30,8 @@ pub struct ScrollBar {
     pub(crate) moved: bool,
     pub(crate) portal_size: f64,
     pub(crate) content_size: f64,
+    pub(crate) idle_thumb_width: f64,
+    pub(crate) active_thumb_width: f64,
     grab_anchor: Option<f64>,
 }
 
@@ -43,8 +45,17 @@ impl ScrollBar {
             moved: false,
             portal_size,
             content_size,
+            idle_thumb_width: theme::SCROLLBAR_WIDTH,
+            active_thumb_width: theme::SCROLLBAR_WIDTH,
             grab_anchor: None,
         }
+    }
+
+    /// Use a slim visual thumb while preserving the normal hit target.
+    pub fn with_thumb_widths(mut self, idle: f64, active: f64) -> Self {
+        self.idle_thumb_width = idle.max(1.0);
+        self.active_thumb_width = active.max(self.idle_thumb_width);
+        self
     }
 
     /// Returns how far the scrollbar is from its initial point.
@@ -129,8 +140,13 @@ impl Widget for ScrollBar {
         event: &PointerEvent,
     ) {
         match event {
-            PointerEvent::Down(PointerButtonEvent { state, .. }) => {
+            PointerEvent::Down(PointerButtonEvent {
+                button: Some(PointerButton::Primary),
+                state,
+                ..
+            }) => {
                 ctx.capture_pointer();
+                ctx.set_handled();
 
                 let cursor_min_length = theme::SCROLLBAR_MIN_SIZE;
                 let cursor_rect = self.get_cursor_rect(ctx.size(), cursor_min_length);
@@ -149,6 +165,7 @@ impl Widget for ScrollBar {
             }
             PointerEvent::Move(PointerUpdate { current, .. }) => {
                 if let Some(grab_anchor) = self.grab_anchor {
+                    ctx.set_handled();
                     let cursor_min_length = theme::SCROLLBAR_MIN_SIZE;
                     self.cursor_progress = self.progress_from_mouse_pos(
                         ctx.size(),
@@ -157,12 +174,14 @@ impl Widget for ScrollBar {
                         ctx.local_position(current.position),
                     );
                     self.moved = true;
+                    ctx.request_render();
                 }
-                ctx.request_render();
             }
             PointerEvent::Up(..) | PointerEvent::Cancel(..) => {
-                self.grab_anchor = None;
-                ctx.request_render();
+                if self.grab_anchor.take().is_some() {
+                    ctx.set_handled();
+                    ctx.request_render();
+                }
             }
             _ => {}
         }
@@ -203,23 +222,27 @@ impl Widget for ScrollBar {
     ) -> Size {
         // TODO - handle resize
 
-        let scrollbar_width = theme::SCROLLBAR_WIDTH;
+        let hit_width = theme::SCROLLBAR_WIDTH.max(self.active_thumb_width);
         let cursor_padding = theme::SCROLLBAR_PAD;
         self.axis
             .pack(
                 self.axis.major(bc.max()),
-                scrollbar_width + cursor_padding * 2.0,
+                hit_width + cursor_padding * 2.0,
             )
             .into()
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx<'_>, _props: &PropertiesRef<'_>, scene: &mut Scene) {
-        let radius = theme::SCROLLBAR_RADIUS;
         let edge_width = theme::SCROLLBAR_EDGE_WIDTH;
-        let cursor_padding = theme::SCROLLBAR_PAD;
         let cursor_min_length = theme::SCROLLBAR_MIN_SIZE;
-
-        let (inset_x, inset_y) = self.axis.pack(0.0, cursor_padding);
+        let thumb_width = if self.grab_anchor.is_some() {
+            self.active_thumb_width
+        } else {
+            self.idle_thumb_width
+        };
+        let minor_inset = ((self.axis.minor(ctx.size()) - thumb_width) * 0.5).max(0.0);
+        let (inset_x, inset_y) = self.axis.pack(0.0, minor_inset);
+        let radius = (thumb_width * 0.5).min(theme::SCROLLBAR_RADIUS);
         let cursor_rect = self
             .get_cursor_rect(ctx.size(), cursor_min_length)
             .inset((-inset_x, -inset_y))

@@ -1,6 +1,6 @@
 [package]
 name = "fast-explorer"
-version = "0.1.0"
+version = "0.1.3"
 edition = "2024"
 description = "FastExplorer - a fast alternative file explorer built with Xilem"
 
@@ -47,6 +47,10 @@ zip = { version = "8.2.0", default-features = false, features = ["deflate-flate2
 tokio = { version = "1", features = ["io-util", "net", "time", "sync", "rt", "macros"] }
 tracing = "0.1"
 xilem = "0.4.0"
+reqwest = { version = "0.12.28", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+uuid = { version = "1.24.1", features = ["v4", "serde"] }
+percent-encoding = "2.3.2"
+base64 = "0.22.1"
 
 [patch.crates-io]
 masonry_core = { path = "vendor/masonry_core" }
@@ -56,6 +60,7 @@ masonry = { path = "vendor/masonry" }
 masonry_winit = { path = "vendor/masonry_winit" }
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
+arboard = "3.6.1"
 trash = "5.2.6"
 
 [target.'cfg(target_os = "android")'.dependencies]

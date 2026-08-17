@@ -9,14 +9,15 @@ use accesskit::{Node, Role, Toggled};
 use masonry_core::core::HasProperty;
 use tracing::{Span, trace, trace_span};
 use ui_events::keyboard::Key;
+use ui_events::pointer::PointerButton;
 use vello::Scene;
 use vello::kurbo::Rect;
-use vello::kurbo::{Affine, BezPath, Cap, Dashes, Join, Size, Stroke};
+use vello::kurbo::{Affine, BezPath, Cap, Dashes, Join, Point, Size, Stroke};
 
 use crate::core::{
     AccessCtx, AccessEvent, ArcStr, BoxConstraints, ChildrenIds, EventCtx, LayoutCtx, NewWidget,
-    PaintCtx, PointerEvent, PropertiesMut, PropertiesRef, RegisterCtx, TextEvent, Update,
-    UpdateCtx, Widget, WidgetId, WidgetMut, WidgetPod,
+    PaintCtx, PointerButtonEvent, PointerEvent, PointerId, PointerType, PointerUpdate, PropertiesMut,
+    PropertiesRef, RegisterCtx, TextEvent, Update, UpdateCtx, Widget, WidgetId, WidgetMut, WidgetPod,
 };
 use crate::properties::{
     ActiveBackground, Background, BorderColor, BorderWidth, CheckmarkColor, CheckmarkStrokeWidth,
@@ -41,6 +42,8 @@ pub struct Checkbox {
     checked: bool,
     // FIXME - Remove label child, have this widget only be a box with a checkmark.
     label: WidgetPod<Label>,
+    touch_start: Option<(Option<PointerId>, Point)>,
+    touch_moved: bool,
 }
 
 impl Checkbox {
@@ -49,6 +52,8 @@ impl Checkbox {
         Self {
             checked,
             label: WidgetPod::new(Label::new(text)),
+            touch_start: None,
+            touch_moved: false,
         }
     }
 
@@ -57,6 +62,8 @@ impl Checkbox {
         Self {
             checked,
             label: label.to_pod(),
+            touch_start: None,
+            touch_moved: false,
         }
     }
 }
@@ -112,14 +119,61 @@ impl Widget for Checkbox {
         event: &PointerEvent,
     ) {
         match event {
-            PointerEvent::Down { .. } => {
-                ctx.capture_pointer();
+            PointerEvent::Down(PointerButtonEvent {
+                button: None | Some(PointerButton::Primary),
+                pointer,
+                state,
+                ..
+            }) => {
+                if pointer.pointer_type == PointerType::Touch {
+                    // Keep touch scrolling available to an ancestor Portal. A tap is
+                    // recognized on Up only if the finger did not turn into a drag.
+                    self.touch_start = Some((
+                        pointer.pointer_id,
+                        Point::new(state.position.x, state.position.y),
+                    ));
+                    self.touch_moved = false;
+                } else {
+                    ctx.capture_pointer();
+                }
                 trace!("Checkbox {:?} pressed", ctx.widget_id());
             }
-            PointerEvent::Up { .. } => {
-                if ctx.is_active() && ctx.is_hovered() {
+            PointerEvent::Move(PointerUpdate {
+                pointer, current, ..
+            }) => {
+                if let Some((id, start)) = self.touch_start
+                    && pointer.pointer_id == id
+                {
+                    let current = Point::new(current.position.x, current.position.y);
+                    if (current - start).hypot() > 12.0 {
+                        self.touch_moved = true;
+                    }
+                }
+            }
+            PointerEvent::Up(PointerButtonEvent { pointer, .. }) => {
+                let touch_tap = pointer.pointer_type == PointerType::Touch
+                    && self
+                        .touch_start
+                        .is_some_and(|(id, _)| id == pointer.pointer_id)
+                    && !self.touch_moved;
+                if touch_tap
+                    || (pointer.pointer_type != PointerType::Touch
+                        && ctx.is_active()
+                        && ctx.is_hovered())
+                {
                     ctx.submit_action::<Self::Action>(CheckboxToggled(!self.checked));
                     trace!("Checkbox {:?} released", ctx.widget_id());
+                }
+                self.touch_start = None;
+                self.touch_moved = false;
+            }
+            PointerEvent::Cancel(pointer) => {
+                if self
+                    .touch_start
+                    .is_some_and(|(id, _)| id == pointer.pointer_id)
+                {
+                    self.touch_start = None;
+                    self.touch_moved = false;
                 }
             }
             _ => (),

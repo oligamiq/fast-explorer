@@ -14,8 +14,8 @@ use vello::kurbo::{Circle, Point, Rect, Size};
 use crate::core::keyboard::{Key, NamedKey};
 use crate::core::{
     AccessCtx, AccessEvent, BoxConstraints, ChildrenIds, EventCtx, HasProperty, LayoutCtx,
-    PaintCtx, PointerButtonEvent, PointerEvent, PointerUpdate, PropertiesMut, PropertiesRef,
-    RegisterCtx, TextEvent, Update, UpdateCtx, Widget, WidgetId, WidgetMut,
+    PaintCtx, PointerButtonEvent, PointerEvent, PointerId, PointerType, PointerUpdate, PropertiesMut,
+    PropertiesRef, RegisterCtx, TextEvent, Update, UpdateCtx, Widget, WidgetId, WidgetMut,
 };
 use crate::properties::{Background, BarColor, ThumbColor, ThumbRadius, TrackThickness};
 use crate::theme;
@@ -30,6 +30,8 @@ pub struct Slider {
     max: f64,
     value: f64,
     step: Option<f64>,
+    touch_start: Option<(Option<PointerId>, Point)>,
+    touch_dragging: bool,
 }
 
 // --- MARK: BUILDERS
@@ -41,6 +43,8 @@ impl Slider {
             max,
             value: value.clamp(min, max),
             step: None,
+            touch_start: None,
+            touch_dragging: false,
         }
     }
 
@@ -155,12 +159,32 @@ impl Widget for Slider {
         }
         match event {
             PointerEvent::Down(PointerButtonEvent {
+                button,
+                pointer,
+                state,
+                ..
+            }) if pointer.pointer_type == PointerType::Touch
+                && (button.is_none() || *button == Some(PointerButton::Primary)) =>
+            {
+                ctx.request_focus();
+                ctx.capture_pointer();
+                self.touch_start = Some((
+                    pointer.pointer_id,
+                    Point::new(state.position.x, state.position.y),
+                ));
+                self.touch_dragging = false;
+                // Intentionally leave the Down event unhandled so a parent Portal
+                // can prepare a vertical pan. The first meaningful Move decides
+                // whether this sequence is a slider drag or page scrolling.
+            }
+            PointerEvent::Down(PointerButtonEvent {
                 button: Some(PointerButton::Primary),
                 state,
                 ..
             }) => {
                 ctx.request_focus();
                 ctx.capture_pointer();
+                ctx.set_handled();
                 let local_pos = ctx.local_position(state.position);
                 if self.update_value_from_position(
                     local_pos.x,
@@ -171,8 +195,47 @@ impl Widget for Slider {
                     ctx.submit_action::<f64>(self.value);
                 }
             }
-            PointerEvent::Move(PointerUpdate { current, .. }) => {
-                if ctx.is_active() {
+            PointerEvent::Move(PointerUpdate {
+                pointer, current, ..
+            }) => {
+                if let Some((id, start)) = self.touch_start
+                    && pointer.pointer_id == id
+                {
+                    let current_window = Point::new(current.position.x, current.position.y);
+                    let delta = current_window - start;
+                    const TOUCH_AXIS_THRESHOLD: f64 = 8.0;
+                    if !self.touch_dragging
+                        && delta.y.abs() >= TOUCH_AXIS_THRESHOLD
+                        && delta.y.abs() > delta.x.abs()
+                    {
+                        // Vertical intent belongs to the parent scroll surface. It has
+                        // already seen the unhandled Down event, so releasing capture
+                        // lets this Move bubble through and continue that pan.
+                        self.touch_start = None;
+                        ctx.release_pointer();
+                        return;
+                    }
+                    if !self.touch_dragging
+                        && delta.x.abs() >= TOUCH_AXIS_THRESHOLD
+                        && delta.x.abs() >= delta.y.abs()
+                    {
+                        self.touch_dragging = true;
+                    }
+                    if self.touch_dragging {
+                        ctx.set_handled();
+                        let local_pos = ctx.local_position(current.position);
+                        if self.update_value_from_position(
+                            local_pos.x,
+                            ctx.size().width,
+                            *props.get(),
+                            ctx.is_focus_target(),
+                        ) {
+                            ctx.submit_action::<f64>(self.value);
+                        }
+                        ctx.request_render();
+                    }
+                } else if ctx.is_active() {
+                    ctx.set_handled();
                     let local_pos = ctx.local_position(current.position);
                     if self.update_value_from_position(
                         local_pos.x,
@@ -186,11 +249,51 @@ impl Widget for Slider {
                 }
             }
             PointerEvent::Up(PointerButtonEvent {
+                button,
+                pointer,
+                state,
+                ..
+            }) if pointer.pointer_type == PointerType::Touch
+                && (button.is_none() || *button == Some(PointerButton::Primary)) =>
+            {
+                if self
+                    .touch_start
+                    .is_some_and(|(id, _)| id == pointer.pointer_id)
+                {
+                    ctx.set_handled();
+                    if !self.touch_dragging {
+                        let local_pos = ctx.local_position(state.position);
+                        if self.update_value_from_position(
+                            local_pos.x,
+                            ctx.size().width,
+                            *props.get(),
+                            ctx.is_focus_target(),
+                        ) {
+                            ctx.submit_action::<f64>(self.value);
+                        }
+                    }
+                    self.touch_start = None;
+                    self.touch_dragging = false;
+                    ctx.release_pointer();
+                    ctx.request_render();
+                }
+            }
+            PointerEvent::Up(PointerButtonEvent {
                 button: Some(PointerButton::Primary),
                 ..
             }) => {
                 if ctx.is_active() {
+                    ctx.set_handled();
                     ctx.release_pointer();
+                }
+            }
+            PointerEvent::Cancel(pointer) => {
+                if self
+                    .touch_start
+                    .is_some_and(|(id, _)| id == pointer.pointer_id)
+                {
+                    self.touch_start = None;
+                    self.touch_dragging = false;
                 }
             }
             _ => {}

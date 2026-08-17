@@ -13,6 +13,8 @@ mod cli;
 mod ipc;
 mod search;
 mod settings;
+mod supabase_sync;
+mod system_clipboard;
 mod tailscale;
 mod theme;
 mod thumbnails;

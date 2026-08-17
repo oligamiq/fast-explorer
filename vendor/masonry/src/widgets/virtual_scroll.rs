@@ -11,7 +11,7 @@ use vello::kurbo::{Point, Rect, Size, Vec2};
 use crate::core::keyboard::{Key, KeyState, NamedKey};
 use crate::core::{
     AccessCtx, AccessEvent, BoxConstraints, ChildrenIds, ComposeCtx, EventCtx, KeyboardEvent,
-    LayoutCtx, NewWidget, PaintCtx, PointerButtonEvent, PointerEvent, PointerId,
+    LayoutCtx, NewWidget, PaintCtx, PointerButton, PointerButtonEvent, PointerEvent, PointerId,
     PointerScrollEvent, PointerType, PointerUpdate, PropertiesMut, PropertiesRef, RegisterCtx,
     ScrollDelta, TextEvent, Update, UpdateCtx, Widget, WidgetMut, WidgetPod,
 };
@@ -674,12 +674,21 @@ impl Widget for VirtualScroll {
         event: &PointerEvent,
     ) {
         match event {
-            PointerEvent::Down(PointerButtonEvent { pointer, state, .. }) => {
+            PointerEvent::Down(PointerButtonEvent {
+                button,
+                pointer,
+                state,
+                ..
+            }) => {
                 let local = ctx.local_position(state.position);
-                if let Some((track, thumb, _)) = self.scrollbar_geometry(ctx.size())
+                let scrollbar_activation = pointer.pointer_type != PointerType::Touch
+                    && *button == Some(PointerButton::Primary);
+                if scrollbar_activation
+                    && let Some((track, thumb, _)) = self.scrollbar_geometry(ctx.size())
                     && track.contains(local)
                 {
                     ctx.capture_pointer();
+                    ctx.set_handled();
                     self.touch_pan = None;
                     let full_thumb_y0 = (thumb.y0 - theme::SCROLLBAR_PAD).max(0.0);
                     let full_thumb_height = thumb.height() + theme::SCROLLBAR_PAD * 2.0;
@@ -709,6 +718,7 @@ impl Widget for VirtualScroll {
             }) => {
                 let local = ctx.local_position(current.position);
                 if let Some(grab_anchor) = self.scrollbar_drag_anchor {
+                    ctx.set_handled();
                     if let Some(result) = self.drag_scrollbar_to(ctx.size(), local.y, grab_anchor) {
                         Self::request_estimated_scroll_update(ctx, result);
                     }
@@ -737,6 +747,9 @@ impl Widget for VirtualScroll {
                 });
                 let scrollbar_finished = self.scrollbar_drag_anchor.is_some();
                 if touch_finished || scrollbar_finished {
+                    if scrollbar_finished {
+                        ctx.set_handled();
+                    }
                     self.touch_pan = None;
                     self.scrollbar_drag_anchor = None;
                     if scrollbar_finished {
@@ -752,6 +765,9 @@ impl Widget for VirtualScroll {
                 });
                 let scrollbar_cancelled = self.scrollbar_drag_anchor.is_some();
                 if touch_cancelled || scrollbar_cancelled {
+                    if scrollbar_cancelled {
+                        ctx.set_handled();
+                    }
                     self.touch_pan = None;
                     self.scrollbar_drag_anchor = None;
                     if scrollbar_cancelled {

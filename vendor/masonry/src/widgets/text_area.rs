@@ -16,10 +16,10 @@ use vello::peniko::Fill;
 
 use crate::core::keyboard::{Key, KeyState, NamedKey};
 use crate::core::{
-    AccessCtx, AccessEvent, BoxConstraints, BrushIndex, ChildrenIds, CursorIcon, EventCtx, Ime,
-    LayoutCtx, PaintCtx, PointerButton, PointerButtonEvent, PointerEvent, PointerUpdate,
-    PropertiesMut, PropertiesRef, QueryCtx, RegisterCtx, StyleProperty, TextEvent, Update,
-    UpdateCtx, Widget, WidgetId, WidgetMut, render_text,
+    AccessCtx, AccessEvent, AllowRawMut, BoxConstraints, BrushIndex, ChildrenIds, CursorIcon,
+    EventCtx, Ime, LayoutCtx, PaintCtx, PointerButton, PointerButtonEvent, PointerEvent, PointerType,
+    PointerUpdate, PropertiesMut, PropertiesRef, QueryCtx, RawCtx, RegisterCtx, StyleProperty,
+    TextEvent, Update, UpdateCtx, Widget, WidgetId, WidgetMut, render_text,
 };
 use crate::properties::{
     CaretColor, ContentColor, DisabledContentColor, SelectionColor, UnfocusedSelectionColor,
@@ -266,6 +266,30 @@ impl<const EDITABLE: bool> TextArea<EDITABLE> {
             .cursor_geometry(1.5)
             .map(bounding_box_to_rect);
         (full_width, caret)
+    }
+
+    /// Place the caret using a coordinate supplied by a single-line parent.
+    ///
+    /// This is used when the parent's marquee translation makes the parent,
+    /// rather than this child, the initial pointer target. The X coordinate is
+    /// already expressed in the unscrolled text coordinate space.
+    pub(crate) fn place_caret_from_parent(&mut self, ctx: &mut RawCtx<'_>, x: f64) {
+        let (fctx, lctx) = ctx.text_contexts();
+        self.editor
+            .driver(fctx, lctx)
+            .move_to_point(x.max(0.0) as f32, 0.0);
+        let new_generation = self.editor.generation();
+        if new_generation != self.rendered_generation {
+            ctx.request_layout();
+            if self.editor.try_layout().is_some() {
+                ctx.set_ime_area(self.ime_area());
+            }
+            self.rendered_generation = new_generation;
+        }
+        if EDITABLE {
+            let (text, selection, compose) = self.platform_ime_state();
+            ctx.set_ime_text_state(text, selection, compose);
+        }
     }
 
     /// Get the IME area from the editor, accounting for padding.
@@ -540,9 +564,11 @@ impl<const EDITABLE: bool> Widget for TextArea<EDITABLE> {
         match event {
             PointerEvent::Down(PointerButtonEvent {
                 button: None | Some(PointerButton::Primary),
+                pointer,
                 state,
                 ..
             }) => {
+                let was_focused = ctx.is_focus_target();
                 let cursor_pos = ctx.local_position(state.position);
                 let (fctx, lctx) = ctx.text_contexts();
                 let mut drv = self.editor.driver(fctx, lctx);
@@ -572,7 +598,16 @@ impl<const EDITABLE: bool> Widget for TextArea<EDITABLE> {
                     self.rendered_generation = new_generation;
                 }
                 ctx.request_focus();
-                ctx.capture_pointer();
+                let touch = pointer.pointer_type == PointerType::Touch;
+                // An unfocused text field should still let the surrounding mobile page
+                // start a pan when the user drags from it. Once the field is focused,
+                // touch drags belong to caret/selection editing instead.
+                if !touch || was_focused {
+                    ctx.capture_pointer();
+                    if touch {
+                        ctx.set_handled();
+                    }
+                }
                 if EDITABLE {
                     let (text, selection, compose) = self.platform_ime_state();
                     ctx.set_ime_text_state(text, selection, compose);
@@ -1194,6 +1229,8 @@ pub enum InsertNewline {
 // TODO: What other tests can we have? Some options:
 // - Clicking in the right place changes the selection as expected?
 // - Keyboard actions have expected results?
+
+impl<const EDITABLE: bool> AllowRawMut for TextArea<EDITABLE> {}
 
 #[cfg(test)]
 mod tests {

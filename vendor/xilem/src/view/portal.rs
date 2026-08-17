@@ -18,6 +18,8 @@ where
     Portal {
         child,
         reveal_target: None,
+        horizontal_anchor: None,
+        horizontal_scrollbar_thumb_widths: None,
         phantom: PhantomData,
     }
 }
@@ -27,6 +29,8 @@ where
 pub struct Portal<V, State, Action> {
     child: V,
     reveal_target: Option<Rect>,
+    horizontal_anchor: Option<(f64, u64)>,
+    horizontal_scrollbar_thumb_widths: Option<(f64, f64)>,
     phantom: PhantomData<(State, Action)>,
 }
 
@@ -35,6 +39,20 @@ impl<V, State, Action> Portal<V, State, Action> {
     /// the target changes on a later rebuild.
     pub fn reveal_target(mut self, target: Option<Rect>) -> Self {
         self.reveal_target = target;
+        self
+    }
+
+    /// Preserve a child-coordinate X position across relayouts.
+    /// The revision forces a fresh capture after an explicit anchoring gesture.
+    pub fn horizontal_anchor(mut self, anchor: Option<(f64, u64)>) -> Self {
+        self.horizontal_anchor = anchor;
+        self
+    }
+
+    /// Keep a generous scrollbar hit target while drawing a slimmer horizontal thumb.
+    pub fn horizontal_scrollbar_thumb_widths(mut self, idle: f64, active: f64) -> Self {
+        let idle = idle.max(1.0);
+        self.horizontal_scrollbar_thumb_widths = Some((idle, active.max(idle)));
         self
     }
 }
@@ -57,6 +75,12 @@ where
         if let Some(target) = self.reveal_target {
             widget = widget.initial_pan_to(target);
         }
+        if let Some((anchor, _revision)) = self.horizontal_anchor {
+            widget = widget.horizontal_anchor(anchor);
+        }
+        if let Some((idle, active)) = self.horizontal_scrollbar_thumb_widths {
+            widget = widget.horizontal_scrollbar_thumb_widths(idle, active);
+        }
         let widget_pod = ctx.create_pod(widget);
         (widget_pod, child_state)
     }
@@ -73,6 +97,18 @@ where
             && let Some(target) = self.reveal_target
         {
             widgets::Portal::set_pending_pan_to(&mut element, target);
+        }
+        if self.horizontal_anchor != prev.horizontal_anchor {
+            widgets::Portal::set_horizontal_anchor(
+                &mut element,
+                self.horizontal_anchor.map(|(anchor, _revision)| anchor),
+            );
+        }
+        if self.horizontal_scrollbar_thumb_widths != prev.horizontal_scrollbar_thumb_widths {
+            widgets::Portal::set_horizontal_scrollbar_thumb_widths(
+                &mut element,
+                self.horizontal_scrollbar_thumb_widths,
+            );
         }
         let child_element = widgets::Portal::child_mut(&mut element);
         self.child

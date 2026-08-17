@@ -73,7 +73,7 @@ final class FastExplorerAabInstaller {
         }
     }
 
-    private static SigningConfiguration signingConfiguration() throws Exception {
+    static SigningConfiguration signingConfiguration() throws Exception {
         KeyStore keyStore = KeyStore.getInstance("AndroidKeyStore");
         keyStore.load(null);
         if (!keyStore.containsAlias(KEY_ALIAS)) {

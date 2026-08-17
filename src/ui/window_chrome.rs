@@ -329,8 +329,10 @@ impl Widget for WindowResizeRegion {
         event: &PointerEvent,
     ) {
         if let PointerEvent::Down(button) = event
-            && button.button == Some(PointerButton::Primary)
+            && (button.button == Some(PointerButton::Primary)
+                || (button.button.is_none() && button.pointer.pointer_type == PointerType::Touch))
         {
+            ctx.set_handled();
             ctx.drag_resize_window(self.0);
         }
     }
@@ -397,12 +399,19 @@ impl Widget for WindowDragRegion {
         if let PointerEvent::Down(button) = event {
             match button.button {
                 Some(PointerButton::Primary) if button.state.count >= 2 => {
+                    ctx.set_handled();
                     ctx.toggle_maximized();
                 }
                 Some(PointerButton::Primary) => {
+                    ctx.set_handled();
+                    ctx.drag_window();
+                }
+                None if button.pointer.pointer_type == PointerType::Touch => {
+                    ctx.set_handled();
                     ctx.drag_window();
                 }
                 Some(PointerButton::Secondary) => {
+                    ctx.set_handled();
                     ctx.show_window_menu(button.state.logical_position());
                 }
                 _ => {}
@@ -742,13 +751,19 @@ impl Widget for WindowCaptionButton {
         event: &PointerEvent,
     ) {
         match event {
-            PointerEvent::Down(button) if button.button == Some(PointerButton::Primary) => {
+            PointerEvent::Down(PointerButtonEvent {
+                button: None | Some(PointerButton::Primary),
+                ..
+            }) => {
                 ctx.capture_pointer();
+                ctx.set_handled();
                 ctx.request_paint_only();
             }
-            PointerEvent::Up(PointerButtonEvent { button, .. })
-                if *button == Some(PointerButton::Primary) =>
-            {
+            PointerEvent::Up(PointerButtonEvent {
+                button: None | Some(PointerButton::Primary),
+                ..
+            }) => {
+                ctx.set_handled();
                 if ctx.is_active() && ctx.is_hovered() {
                     self.activate(ctx);
                 }

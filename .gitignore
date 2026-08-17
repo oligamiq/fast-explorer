@@ -11,4 +11,5 @@ __pycache__/
 /android-gradle/build/
 /android-gradle/app/build/
 /android-gradle/local.properties
+/android-gradle/app/google-services.json
 /dist/android/*.idsig

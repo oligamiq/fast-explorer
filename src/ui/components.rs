@@ -18,13 +18,16 @@ use super::file_row::file_row_button;
 use super::file_shortcuts::file_list_shortcuts;
 use super::font::{label, prose, text_input};
 use super::icons::{LucideIcon, icon, progress_ring};
-use super::tab_drag::{TabDragConfig, tab_drag_button};
+use super::tab_drag::{
+    GroupDragConfig, TabDragConfig, TabDropGroupSpan, group_drag_button, tab_drag_button,
+};
 #[cfg(not(target_os = "android"))]
 use super::window_chrome::{CaptionButtonKind, caption_button, drag_region};
 use super::window_chrome::{NavigationButtonKind, navigation_button};
 use crate::app::{
-    AppState, EntryKind, FileCategory, FileEntry, SortDirection, SortField, TabGroupColor,
-    TabGroupState, TaildriveLocation, parse_taildrive_path, taildrive_path,
+    AppState, EntryKind, FileCategory, FileEntry, SettingsEntryPoint, SortDirection, SortField,
+    TabGroupColor, TabGroupState, TabStripDragPreviewHandle, TaildriveLocation,
+    parse_taildrive_path, taildrive_path,
 };
 use crate::settings::{PathOverflowBehavior, SearchMode, UiFont};
 use crate::theme::{AppearanceMode, Layout, ThemeColor, ThemePalette};
@@ -47,13 +50,13 @@ fn compact_group_width(name: &str) -> f64 {
         .chars()
         .map(|ch| if ch.is_ascii() { 7.0 } else { 12.5 })
         .sum::<f64>();
-    // Reserve room for the color dot, label padding, and the separate edit button.
-    (label_width + 88.0).clamp(96.0, 210.0)
+    // Only reserve room for the color dot and label padding. Group editing is
+    // gesture/context-menu driven; the video reference has no inline ellipsis.
+    (label_width + 40.0).clamp(64.0, 180.0)
 }
 
 fn tab_group_color(color: TabGroupColor) -> Color {
     match color {
-        TabGroupColor::Grey => Color::from_rgb8(112, 112, 112),
         TabGroupColor::Blue => Color::from_rgb8(50, 115, 220),
         TabGroupColor::Red => Color::from_rgb8(210, 67, 67),
         TabGroupColor::Yellow => Color::from_rgb8(205, 157, 27),
@@ -68,10 +71,9 @@ fn tab_group_color(color: TabGroupColor) -> Color {
 fn tab_group_header(
     group: TabGroupState,
     width: f64,
-    anchor_x: f64,
+    drag_config: GroupDragConfig,
     palette: ThemePalette,
 ) -> impl WidgetView<AppState> {
-    let group_id = group.id();
     let color = tab_group_color(group.color());
     let display_name = if group.name().trim().is_empty() {
         "Group".to_owned()
@@ -87,50 +89,37 @@ fn tab_group_header(
         dot,
         FlexSpacer::Fixed(6.px()),
         sized_box(
-            prose(display_name)
-                .line_break_mode(LineBreaking::Clip)
+            label(display_name)
                 .text_size(12.0)
-                .text_color(palette.text),
+                .color(palette.text)
+                .line_break_mode(LineBreaking::Clip),
         )
         .flex(1.0),
     ))
     .gap(0.px())
     .cross_axis_alignment(CrossAxisAlignment::Center);
-    let collapse = sized_box(
-        button(content, move |state: &mut AppState| {
-            state.toggle_tab_group_collapsed(group_id)
-        })
+    let collapse_surface = sized_box(content)
+        .expand()
         .padding(Padding::from_vh(5.0, 8.0))
         .background_color(palette.tab_inactive)
-        .active_background_color(palette.accent_soft)
         .border(color, 1.0)
-        .hovered_border_color(color)
-        .corner_radius(Layout::RADIUS),
-    )
-    .flex(1.0);
-    let edit_id = group.id();
-    let edit = icon_button(
-        LucideIcon::Ellipsis,
-        "Edit tab group",
-        false,
-        move |state| state.open_tab_group_editor_at(edit_id, anchor_x),
-        palette,
-    );
-    sized_box(
-        flex_row((collapse, edit))
-            .gap(2.px())
-            .cross_axis_alignment(CrossAxisAlignment::Center),
-    )
-    .width(width.px())
-    .height(Layout::TOOL_HEIGHT.px())
-    .padding(Padding::horizontal(2.0))
+        .corner_radius(Layout::RADIUS);
+    sized_box(group_drag_button(collapse_surface, drag_config))
+        .width(width.px())
+        .height(Layout::TOOL_HEIGHT.px())
+        .padding(Padding::horizontal(2.0))
 }
 
 fn tab_strip_views(
     state: &AppState,
     min_tab_width: f64,
     palette: ThemePalette,
-) -> (Vec<Box<AnyWidgetView<AppState>>>, f64, Option<Rect>) {
+) -> (
+    Vec<Box<AnyWidgetView<AppState>>>,
+    f64,
+    Option<Rect>,
+    Option<(f64, u64)>,
+) {
     #[derive(Clone, Copy)]
     enum Slot {
         Group(u64, f64),
@@ -144,7 +133,8 @@ fn tab_strip_views(
     let titles = state
         .tabs()
         .iter()
-        .map(|tab| tab.title())
+        .enumerate()
+        .map(|(index, _)| state.tab_title(index))
         .collect::<Vec<_>>();
     let widths = titles
         .iter()
@@ -171,6 +161,14 @@ fn tab_strip_views(
         slots.push(Slot::Tab(index, widths[index]));
     }
 
+    let preview_handle = state.tab_strip_drag_preview_handle();
+    let preview_active = state.tab_strip_drag_preview_active();
+    let slot_widths = slots
+        .iter()
+        .map(|slot| match slot {
+            Slot::Group(_, width) | Slot::Tab(_, width) => *width,
+        })
+        .collect::<Vec<_>>();
     let visible_indices = slots
         .iter()
         .filter_map(|slot| match slot {
@@ -182,27 +180,74 @@ fn tab_strip_views(
         .iter()
         .map(|index| widths[*index])
         .collect::<Vec<_>>();
+    let visible_ids = visible_indices
+        .iter()
+        .map(|index| state.tabs()[*index].id())
+        .collect::<Vec<_>>();
+    let visible_groups = visible_indices
+        .iter()
+        .map(|index| state.tabs()[*index].group_id())
+        .collect::<Vec<_>>();
+    let visible_slot_indices = slots
+        .iter()
+        .enumerate()
+        .filter_map(|(slot_index, slot)| match slot {
+            Slot::Tab(_, _) => Some(slot_index),
+            Slot::Group(_, _) => None,
+        })
+        .collect::<Vec<_>>();
+    let mut slot_centers = Vec::with_capacity(slots.len());
     let mut tab_centers = Vec::with_capacity(visible_indices.len());
+    let mut group_spans: Vec<TabDropGroupSpan> = Vec::new();
+    let scroll_anchor = state.tab_group_scroll_anchor();
+    let scroll_anchor_group = scroll_anchor.map(|(group_id, _)| group_id);
+    let scroll_anchor_epoch = scroll_anchor.map(|(_, epoch)| epoch);
+    let mut horizontal_anchor_x = None;
     let mut x = 0.0;
     let mut reveal_target = None;
     for slot in &slots {
+        let slot_width = match *slot {
+            Slot::Group(_, width) | Slot::Tab(_, width) => width,
+        };
+        slot_centers.push(x + slot_width * 0.5);
         match *slot {
             Slot::Group(group_id, width) => {
-                if state
-                    .tabs()
-                    .get(active)
-                    .is_some_and(|tab| tab.group_id() == Some(group_id))
+                if let Some(group) = state.tab_group(group_id) {
+                    group_spans.push(TabDropGroupSpan {
+                        group_id,
+                        start: x,
+                        header_center: x + width * 0.5,
+                        end: x + width,
+                        color: tab_group_color(group.color()),
+                    });
+                }
+                let header_rect = Rect::new(x, 0.0, x + width, Layout::TOOL_HEIGHT);
+                if scroll_anchor_group == Some(group_id) {
+                    horizontal_anchor_x = Some(x + width * 0.5);
+                    reveal_target = Some(header_rect);
+                } else if scroll_anchor_group.is_none()
+                    && state
+                        .tabs()
+                        .get(active)
+                        .is_some_and(|tab| tab.group_id() == Some(group_id))
                     && state
                         .tab_group(group_id)
                         .is_some_and(TabGroupState::collapsed)
                 {
-                    reveal_target = Some(Rect::new(x, 0.0, x + width, Layout::TOOL_HEIGHT));
+                    reveal_target = Some(header_rect);
                 }
                 x += width;
             }
             Slot::Tab(index, width) => {
                 tab_centers.push(x + width * 0.5);
-                if index == active {
+                if let Some(group_id) = state.tabs()[index].group_id()
+                    && let Some(span) = group_spans
+                        .iter_mut()
+                        .find(|span| span.group_id == group_id)
+                {
+                    span.end = x + width;
+                }
+                if scroll_anchor_group.is_none() && index == active {
                     reveal_target = Some(Rect::new(x, 0.0, x + width, Layout::TOOL_HEIGHT));
                 }
                 x += width;
@@ -213,15 +258,114 @@ fn tab_strip_views(
 
     let ids = state.tabs().iter().map(|tab| tab.id()).collect::<Vec<_>>();
     let drop_targets = visible_indices.clone();
+
+    #[derive(Clone, Copy)]
+    struct DragBlock {
+        center: f64,
+        target_tab_id: u64,
+        group_id: Option<u64>,
+        start_slot: usize,
+        end_slot: usize,
+    }
+
+    let mut blocks = Vec::<DragBlock>::new();
+    let mut block_slot = 0;
+    while block_slot < slots.len() {
+        match slots[block_slot] {
+            Slot::Group(group_id, _) => {
+                let mut end_slot = block_slot;
+                while end_slot + 1 < slots.len() {
+                    match slots[end_slot + 1] {
+                        Slot::Tab(index, _) if state.tabs()[index].group_id() == Some(group_id) => {
+                            end_slot += 1;
+                        }
+                        _ => break,
+                    }
+                }
+                if let Some(first_tab) = state
+                    .tabs()
+                    .iter()
+                    .find(|tab| tab.group_id() == Some(group_id))
+                {
+                    let start = slot_centers[block_slot] - slot_widths[block_slot] * 0.5;
+                    let end = slot_centers[end_slot] + slot_widths[end_slot] * 0.5;
+                    blocks.push(DragBlock {
+                        center: (start + end) * 0.5,
+                        target_tab_id: first_tab.id(),
+                        group_id: Some(group_id),
+                        start_slot: block_slot,
+                        end_slot,
+                    });
+                }
+                block_slot = end_slot + 1;
+            }
+            Slot::Tab(index, _) => {
+                if state.tabs()[index].group_id().is_none() {
+                    blocks.push(DragBlock {
+                        center: slot_centers[block_slot],
+                        target_tab_id: ids[index],
+                        group_id: None,
+                        start_slot: block_slot,
+                        end_slot: block_slot,
+                    });
+                }
+                block_slot += 1;
+            }
+        }
+    }
+    let block_centers = blocks.iter().map(|block| block.center).collect::<Vec<_>>();
+    let block_widths = blocks
+        .iter()
+        .map(|block| {
+            slot_widths[block.start_slot..=block.end_slot]
+                .iter()
+                .sum::<f64>()
+        })
+        .collect::<Vec<_>>();
+    let block_target_tab_ids = blocks
+        .iter()
+        .map(|block| block.target_tab_id)
+        .collect::<Vec<_>>();
+    let block_slot_ranges = blocks
+        .iter()
+        .map(|block| (block.start_slot, block.end_slot))
+        .collect::<Vec<_>>();
+
     let mut views: Vec<Box<AnyWidgetView<AppState>>> = Vec::new();
-    let mut slot_x = 8.0;
-    for slot in slots {
+    for (slot_index, slot) in slots.into_iter().enumerate() {
         match slot {
             Slot::Group(group_id, width) => {
                 if let Some(group) = state.tab_group(group_id).cloned() {
-                    views.push(tab_group_header(group, width, slot_x, palette).boxed());
+                    let source_block_index = blocks
+                        .iter()
+                        .position(|block| block.group_id == Some(group_id))
+                        .unwrap_or(0);
+                    let source_block = blocks[source_block_index];
+                    let accessibility_label = if group.name().trim().is_empty() {
+                        "Group".to_owned()
+                    } else {
+                        group.name().to_owned()
+                    };
+                    let drag_config = GroupDragConfig {
+                        group_id,
+                        collapsed: group.collapsed(),
+                        source_block_index,
+                        block_widths: block_widths.clone(),
+                        block_centers: block_centers.clone(),
+                        block_target_tab_ids: block_target_tab_ids.clone(),
+                        block_slot_ranges: block_slot_ranges.clone(),
+                        source_slot_start: source_block.start_slot,
+                        source_slot_end: source_block.end_slot,
+                        slot_widths: slot_widths.clone(),
+                        preview_handle: preview_handle.clone(),
+                        preview_active,
+                        accessibility_label,
+                        background: palette.tab_inactive,
+                        border: tab_group_color(group.color()),
+                        text_color: palette.text,
+                    };
+                    views.push(tab_group_header(group, width, drag_config, palette).boxed());
                 }
-                slot_x += width;
             }
             Slot::Tab(index, width) => {
                 let drag_index = visible_indices
@@ -232,12 +376,29 @@ fn tab_strip_views(
                     .group_id()
                     .and_then(|group_id| state.tab_group(group_id))
                     .map(|group| tab_group_color(group.color()));
+                let new_group_borders = visible_ids
+                    .iter()
+                    .map(|target_tab_id| {
+                        tab_group_color(state.tab_group_color_for_drag(ids[index], *target_tab_id))
+                    })
+                    .collect::<Vec<_>>();
                 views.push(
                     tab_item(
                         TabItemSpec {
                             index,
+                            source_group: state.tabs()[index].group_id(),
                             drag_index,
+                            tab_ids: visible_ids.clone(),
+                            tab_groups: visible_groups.clone(),
+                            tab_slot_indices: visible_slot_indices.clone(),
                             drop_targets: drop_targets.clone(),
+                            group_spans: group_spans.clone(),
+                            slot_index,
+                            slot_widths: slot_widths.clone(),
+                            slot_centers: slot_centers.clone(),
+                            preview_handle: preview_handle.clone(),
+                            preview_active,
+                            new_group_borders,
                             tab_id: ids[index],
                             title: titles[index].clone(),
                             active: index == active,
@@ -251,24 +412,31 @@ fn tab_strip_views(
                     )
                     .boxed(),
                 );
-                slot_x += width;
             }
         }
     }
 
-    (views, total_width, reveal_target)
+    let horizontal_anchor = horizontal_anchor_x.zip(scroll_anchor_epoch);
+    (views, total_width, reveal_target, horizontal_anchor)
 }
 
 #[cfg(not(target_os = "android"))]
 pub fn tab_bar(state: &AppState) -> impl WidgetView<AppState> + use<> {
     let palette = state.palette();
-    let (tabs, total_width, reveal_target) = tab_strip_views(state, 78.0, palette);
+    let (tabs, total_width, reveal_target, horizontal_anchor) =
+        tab_strip_views(state, 78.0, palette);
     let strip = flex_row(tabs)
         .gap(0.px())
         .cross_axis_alignment(CrossAxisAlignment::Center);
     let tab_strip_width = (total_width + 16.0).min(Layout::TAB_STRIP_MAX);
     let tabs_scroll = sized_box(
-        sized_box(portal(strip).reveal_target(reveal_target)).padding(Padding::from_vh(4.0, 8.0)),
+        sized_box(
+            portal(strip)
+                .reveal_target(reveal_target)
+                .horizontal_anchor(horizontal_anchor)
+                .horizontal_scrollbar_thumb_widths(2.0, 6.0),
+        )
+        .padding(Padding::from_vh(4.0, 8.0)),
     )
     .width(tab_strip_width.px());
     let drag = sized_box(drag_region())
@@ -303,13 +471,18 @@ pub fn tab_bar(state: &AppState) -> impl WidgetView<AppState> + use<> {
 #[cfg(target_os = "android")]
 pub fn tab_bar(state: &AppState) -> impl WidgetView<AppState> + use<> {
     let palette = state.palette();
-    let (tabs, _, reveal_target) = tab_strip_views(state, 88.0, palette);
+    let (tabs, _, reveal_target, horizontal_anchor) = tab_strip_views(state, 88.0, palette);
     let strip = flex_row(tabs)
         .gap(0.px())
         .cross_axis_alignment(CrossAxisAlignment::Center);
-    let tabs_scroll = sized_box(portal(strip).reveal_target(reveal_target))
-        .height(Layout::TAB_HEIGHT.px())
-        .flex(1.0);
+    let tabs_scroll = sized_box(
+        portal(strip)
+            .reveal_target(reveal_target)
+            .horizontal_anchor(horizontal_anchor)
+            .horizontal_scrollbar_thumb_widths(2.0, 6.0),
+    )
+    .height(Layout::TAB_HEIGHT.px())
+    .flex(1.0);
     sized_box(
         flex_row((
             tabs_scroll,
@@ -405,7 +578,9 @@ fn settings_slider(
     value: f64,
     callback: impl Fn(&mut AppState, f64) + Send + Sync + 'static,
 ) -> impl WidgetView<AppState> {
-    sized_box(slider(min, max, value, callback).step(1.0)).expand_width()
+    sized_box(slider(min, max, value, callback).step(1.0))
+        .height(Layout::TOOL_HEIGHT.px())
+        .expand_width()
 }
 
 fn appearance_settings_view(
@@ -769,6 +944,279 @@ fn search_settings_view(state: &AppState, palette: ThemePalette) -> Box<AnyWidge
     .boxed()
 }
 
+fn file_action_guide_view(palette: ThemePalette) -> Box<AnyWidgetView<AppState>> {
+    settings_card(
+        "File action guide",
+        "Reference for toolbar and device-transfer actions. This is also the help path for icon-only buttons on mobile.",
+        flex_col((
+            prose("Copy — stages the selected file or folder for a FastExplorer file copy.")
+                .text_size(12.0)
+                .text_color(palette.text),
+            prose("Copy path — copies the selected item's path text to the OS clipboard.")
+                .text_size(12.0)
+                .text_color(palette.text),
+            prose("Cut / Paste — stages and completes a move; Paste also completes Copy.")
+                .text_size(12.0)
+                .text_color(palette.text),
+            prose("Share — opens the platform share sheet for the selected or prepared local file.")
+                .text_size(12.0)
+                .text_color(palette.text),
+            prose("Send file — uploads the selected local file for one registered device.")
+                .text_size(12.0)
+                .text_color(palette.text),
+            prose("Send clipboard — sends the current OS text clipboard; received clipboard text is only copied locally after you press Copy.")
+                .text_size(12.0)
+                .text_color(palette.text),
+        ))
+        .gap(7.px())
+        .cross_axis_alignment(CrossAxisAlignment::Start),
+        palette,
+    )
+    .boxed()
+}
+
+fn supabase_device_rows(state: &AppState, palette: ThemePalette) -> Box<AnyWidgetView<AppState>> {
+    let local_key = state.supabase_local_device_key().to_owned();
+    let rows = state
+        .supabase_devices()
+        .iter()
+        .map(|device| {
+            let is_local = device.device_key == local_key;
+            let title = if is_local {
+                format!("{} · this device", device.name)
+            } else {
+                format!("{} · {}", device.name, device.platform)
+            };
+            let file_id = device.id.clone();
+            let clipboard_id = device.id.clone();
+            sized_box(
+                flex_row((
+                    sized_box(prose(title).text_size(12.0).text_color(palette.text)).flex(1.0),
+                    toolbar_button(
+                        "Send file",
+                        is_local,
+                        move |state| state.send_selected_file_to_supabase_device(file_id.clone()),
+                        palette,
+                    ),
+                    FlexSpacer::Fixed(6.px()),
+                    toolbar_button(
+                        "Send clipboard",
+                        is_local,
+                        move |state| state.send_clipboard_to_supabase_device(clipboard_id.clone()),
+                        palette,
+                    ),
+                ))
+                .gap(0.px())
+                .cross_axis_alignment(CrossAxisAlignment::Center),
+            )
+            .expand_width()
+            .padding(Padding::vertical(5.0))
+            .boxed()
+        })
+        .collect::<Vec<_>>();
+    if rows.is_empty() {
+        prose("No registered devices yet.")
+            .text_size(12.0)
+            .text_color(palette.muted)
+            .boxed()
+    } else {
+        flex_col(rows)
+            .gap(2.px())
+            .cross_axis_alignment(CrossAxisAlignment::Start)
+            .boxed()
+    }
+}
+
+fn supabase_inbox_rows(state: &AppState, palette: ThemePalette) -> Box<AnyWidgetView<AppState>> {
+    let rows = state
+        .supabase_inbox()
+        .iter()
+        .map(|item| {
+            let is_file = item.kind == "file";
+            let title = if is_file {
+                format!("File · {}", item.file_name)
+            } else {
+                let preview = item.clipboard_text.chars().take(48).collect::<String>();
+                format!("Clipboard · {preview}")
+            };
+            let action_item = item.clone();
+            sized_box(
+                flex_row((
+                    sized_box(prose(title).text_size(12.0).text_color(palette.text)).flex(1.0),
+                    toolbar_button(
+                        if is_file { "Receive" } else { "Copy" },
+                        false,
+                        move |state| {
+                            if is_file {
+                                state.receive_supabase_file(action_item.clone());
+                            } else {
+                                state.copy_supabase_clipboard(action_item.clone());
+                            }
+                        },
+                        palette,
+                    ),
+                ))
+                .gap(0.px())
+                .cross_axis_alignment(CrossAxisAlignment::Center),
+            )
+            .expand_width()
+            .padding(Padding::vertical(5.0))
+            .boxed()
+        })
+        .collect::<Vec<_>>();
+    if rows.is_empty() {
+        prose("Inbox is empty.")
+            .text_size(12.0)
+            .text_color(palette.muted)
+            .boxed()
+    } else {
+        flex_col(rows)
+            .gap(2.px())
+            .cross_axis_alignment(CrossAxisAlignment::Start)
+            .boxed()
+    }
+}
+
+fn supabase_settings_view(state: &AppState, palette: ThemePalette) -> Box<AnyWidgetView<AppState>> {
+    let project_url = settings_text_input(
+        state.supabase_project_url().to_owned(),
+        "https://project-ref.supabase.co",
+        AppState::set_supabase_project_url,
+        |state, value| {
+            state.set_supabase_project_url(value);
+            state.refresh_supabase_devices();
+        },
+        palette,
+    );
+    let publishable_key = settings_text_input(
+        state.supabase_publishable_key().to_owned(),
+        "sb_publishable_... / anon key",
+        AppState::set_supabase_publishable_key,
+        |state, value| state.set_supabase_publishable_key(value),
+        palette,
+    );
+    let device_name = settings_text_input(
+        state.supabase_device_name().to_owned(),
+        "This device name",
+        AppState::set_supabase_device_name,
+        |state, value| {
+            state.set_supabase_device_name(value);
+            state.refresh_supabase_devices();
+        },
+        palette,
+    );
+    let email = settings_text_input(
+        state.supabase_email_input().to_owned(),
+        "you@example.com",
+        AppState::set_supabase_email_input,
+        |state, value| {
+            state.set_supabase_email_input(value);
+            state.request_supabase_otp();
+        },
+        palette,
+    );
+    let otp = settings_text_input(
+        state.supabase_otp_input().to_owned(),
+        "Email OTP",
+        AppState::set_supabase_otp_input,
+        |state, value| {
+            state.set_supabase_otp_input(value);
+            state.verify_supabase_otp();
+        },
+        palette,
+    );
+    let auth = if state.supabase_signed_in() {
+        Either::A(
+            flex_col((
+                prose(format!("Signed in as {}", state.supabase_user_email()))
+                    .text_size(12.0)
+                    .text_color(palette.text),
+                FlexSpacer::Fixed(6.px()),
+                flex_row((
+                    toolbar_button(
+                        "Refresh devices",
+                        false,
+                        AppState::refresh_supabase_devices,
+                        palette,
+                    ),
+                    FlexSpacer::Fixed(6.px()),
+                    toolbar_button("Sign out", false, AppState::sign_out_supabase, palette),
+                ))
+                .gap(0.px()),
+            ))
+            .gap(0.px())
+            .cross_axis_alignment(CrossAxisAlignment::Start),
+        )
+    } else {
+        Either::B(
+            flex_col((
+                settings_row("Email", email, palette),
+                FlexSpacer::Fixed(7.px()),
+                toolbar_button("Send OTP", false, AppState::request_supabase_otp, palette),
+                FlexSpacer::Fixed(9.px()),
+                settings_row("OTP", otp, palette),
+                FlexSpacer::Fixed(7.px()),
+                toolbar_button(
+                    "Verify and sign in",
+                    false,
+                    AppState::verify_supabase_otp,
+                    palette,
+                ),
+            ))
+            .gap(0.px())
+            .cross_axis_alignment(CrossAxisAlignment::Start),
+        )
+    };
+
+    let connection = flex_col((
+        settings_row("Project URL", project_url, palette),
+        FlexSpacer::Fixed(9.px()),
+        settings_row("Publishable key", publishable_key, palette),
+        FlexSpacer::Fixed(9.px()),
+        settings_row("Device name", device_name, palette),
+        FlexSpacer::Fixed(7.px()),
+        toolbar_button(
+            "Apply sync settings",
+            false,
+            AppState::apply_supabase_settings,
+            palette,
+        ),
+        FlexSpacer::Fixed(12.px()),
+        auth,
+        FlexSpacer::Fixed(10.px()),
+        prose(state.supabase_status().to_owned())
+            .text_size(11.0)
+            .text_color(palette.muted),
+    ))
+    .gap(0.px())
+    .cross_axis_alignment(CrossAxisAlignment::Start);
+    let transfers = flex_col((
+        label("Devices").text_size(13.0).color(palette.text),
+        FlexSpacer::Fixed(5.px()),
+        supabase_device_rows(state, palette),
+        FlexSpacer::Fixed(14.px()),
+        label("Incoming").text_size(13.0).color(palette.text),
+        FlexSpacer::Fixed(5.px()),
+        supabase_inbox_rows(state, palette),
+        FlexSpacer::Fixed(10.px()),
+        prose("For a 6-digit email code, set the Supabase Magic Link email template to include {{ .Token }}. Incoming items are polled while FastExplorer is running; Android shows a local notification when a new item arrives.")
+            .text_size(11.0)
+            .text_color(palette.muted),
+    ))
+    .gap(0.px())
+    .cross_axis_alignment(CrossAxisAlignment::Start);
+
+    settings_card(
+        "Device sync (Supabase)",
+        "Sign in by email OTP, register devices under your account, then send files or text clipboard items. Use a publishable/anon key here—never a service_role key.",
+        flex_col((connection, FlexSpacer::Fixed(14.px()), transfers))
+            .gap(0.px())
+            .cross_axis_alignment(CrossAxisAlignment::Start),
+        palette,
+    )
+    .boxed()
+}
+
 fn tailscale_settings_view(
     state: &AppState,
     palette: ThemePalette,
@@ -791,10 +1239,26 @@ fn external_settings_view(palette: ThemePalette) -> Box<AnyWidgetView<AppState>>
 pub fn settings_page(state: &AppState) -> impl WidgetView<AppState> + use<> {
     let palette = state.palette();
     let header = settings_header_view(palette);
-    let mut cards: Vec<Box<AnyWidgetView<AppState>>> = vec![
-        appearance_settings_view(state, palette),
-        files_settings_view(state, palette),
-    ];
+    let mut cards: Vec<Box<AnyWidgetView<AppState>>> = match state.settings_entry_point() {
+        SettingsEntryPoint::General => vec![
+            appearance_settings_view(state, palette),
+            files_settings_view(state, palette),
+            file_action_guide_view(palette),
+            supabase_settings_view(state, palette),
+        ],
+        SettingsEntryPoint::ActionGuide => vec![
+            file_action_guide_view(palette),
+            appearance_settings_view(state, palette),
+            files_settings_view(state, palette),
+            supabase_settings_view(state, palette),
+        ],
+        SettingsEntryPoint::DeviceSync => vec![
+            supabase_settings_view(state, palette),
+            file_action_guide_view(palette),
+            appearance_settings_view(state, palette),
+            files_settings_view(state, palette),
+        ],
+    };
     #[cfg(target_os = "windows")]
     cards.push(explorer_settings_view(state, palette));
     cards.extend([
@@ -837,9 +1301,22 @@ fn tailscale_settings_card(
         .cloned()
         .map(|profile| {
             let profile_id = profile.config.id.clone();
+            let device_path_names = profile
+                .status
+                .taildrive_devices
+                .iter()
+                .map(|device| {
+                    (
+                        device.id.clone(),
+                        state.taildrive_device_name_edit_value(&profile_id, &device.id),
+                    )
+                })
+                .collect::<Vec<_>>();
             tailscale_profile_card(
                 profile,
                 state.tailscale_profile_hostname(&profile_id),
+                state.tailnet_path_edit_value(&profile_id),
+                device_path_names,
                 state.tailscale_offline_peers_expanded(&profile_id),
                 state.tailscale_offline_devices_expanded(&profile_id),
                 palette,
@@ -895,6 +1372,8 @@ fn compact_identity(value: &str, max_chars: usize) -> String {
 fn tailscale_profile_card(
     profile: crate::app::TailnetProfileState,
     hostname_value: String,
+    tailnet_path_value: String,
+    device_path_names: Vec<(String, String)>,
     offline_peers_expanded: bool,
     offline_devices_expanded: bool,
     palette: ThemePalette,
@@ -910,6 +1389,36 @@ fn tailscale_profile_card(
         move |state, value| state.set_tailnet_label(&label_enter_id, value),
         palette,
     );
+    let path_change_id = profile_id.clone();
+    let path_enter_id = profile_id.clone();
+    let path_input = settings_text_input(
+        tailnet_path_value,
+        "tn1",
+        move |state, value| state.edit_tailnet_path(&path_change_id, value),
+        move |state, value| state.apply_tailnet_path_edit(&path_enter_id, value),
+        palette,
+    );
+    let path_apply_id = profile_id.clone();
+    let path_reset_id = profile_id.clone();
+    let path_control = flex_row((
+        sized_box(path_input).expand_width().flex(1.0),
+        FlexSpacer::Fixed(6.px()),
+        toolbar_button(
+            "Apply",
+            false,
+            move |state| state.apply_tailnet_path_draft(&path_apply_id),
+            palette,
+        ),
+        FlexSpacer::Fixed(4.px()),
+        toolbar_button(
+            "Auto",
+            false,
+            move |state| state.reset_tailnet_path(&path_reset_id),
+            palette,
+        ),
+    ))
+    .gap(0.px())
+    .cross_axis_alignment(CrossAxisAlignment::Center);
     let hostname_change_id = profile_id.clone();
     let hostname_enter_id = profile_id.clone();
     let hostname_input = settings_text_input(
@@ -1078,7 +1587,14 @@ fn tailscale_profile_card(
         .partition(|device| device.online);
     let mut taildrive_rows: Vec<Box<AnyWidgetView<AppState>>> = online_taildrive
         .into_iter()
-        .map(|device| taildrive_device_row(device, palette).boxed())
+        .map(|device| {
+            let path_name = device_path_names
+                .iter()
+                .find(|(device_id, _)| device_id == &device.id)
+                .map(|(_, name)| name.clone())
+                .unwrap_or_else(|| device.id.clone());
+            taildrive_device_row(profile_id.clone(), device, path_name, palette).boxed()
+        })
         .collect();
     if !offline_taildrive.is_empty() {
         let offline_count = offline_taildrive.len();
@@ -1093,11 +1609,14 @@ fn tailscale_profile_card(
             .boxed(),
         );
         if offline_devices_expanded {
-            taildrive_rows.extend(
-                offline_taildrive
-                    .into_iter()
-                    .map(|device| taildrive_device_row(device, palette).boxed()),
-            );
+            taildrive_rows.extend(offline_taildrive.into_iter().map(|device| {
+                let path_name = device_path_names
+                    .iter()
+                    .find(|(device_id, _)| device_id == &device.id)
+                    .map(|(_, name)| name.clone())
+                    .unwrap_or_else(|| device.id.clone());
+                taildrive_device_row(profile_id.clone(), device, path_name, palette).boxed()
+            }));
         }
     }
     let taildrive_devices = if taildrive_rows.is_empty() {
@@ -1136,11 +1655,32 @@ fn tailscale_profile_card(
     .gap(0.px())
     .cross_axis_alignment(CrossAxisAlignment::Start);
     let remove_id = profile_id.clone();
+    let identity_settings = flex_col((
+        settings_row("Tailnet path", path_control, palette),
+        FlexSpacer::Fixed(4.px()),
+        prose("Type freely, then press Enter or Apply. Auto restores the stable automatic short path. This only changes FastExplorer's visible path; the internal Tailnet ID stays unchanged.")
+            .text_size(11.0)
+            .text_color(palette.muted),
+        FlexSpacer::Fixed(7.px()),
+        settings_row("Tailscale device name", hostname_input, palette),
+        FlexSpacer::Fixed(6.px()),
+        prose("Press Enter after changing the device name to reconnect with the new name.")
+            .text_size(11.0)
+            .text_color(palette.muted),
+    ))
+    .gap(0.px())
+    .cross_axis_alignment(CrossAxisAlignment::Start);
 
     sized_box(
         flex_col((
             flex_row((
-                sized_box(label_input).height(34.px()).flex(1.0),
+                sized_box(label_input)
+                    .height(if cfg!(target_os = "android") {
+                        48.px()
+                    } else {
+                        34.px()
+                    })
+                    .flex(1.0),
                 toolbar_button(
                     "Remove",
                     false,
@@ -1151,11 +1691,7 @@ fn tailscale_profile_card(
             .gap(0.px())
             .cross_axis_alignment(CrossAxisAlignment::Center),
             FlexSpacer::Fixed(7.px()),
-            settings_row("Tailscale device name", hostname_input, palette),
-            FlexSpacer::Fixed(6.px()),
-            prose("Press Enter after changing the device name to reconnect with the new name.")
-                .text_size(11.0)
-                .text_color(palette.muted),
+            identity_settings,
             FlexSpacer::Fixed(6.px()),
             flex_col((
                 prose(format!("Network: {network_name}"))
@@ -1240,7 +1776,9 @@ fn tailscale_peer_row(
 }
 
 fn taildrive_device_row(
+    profile_id: String,
     device: crate::tailscale::TaildriveDevice,
+    path_name: String,
     palette: ThemePalette,
 ) -> impl WidgetView<AppState> {
     let display_name = if !device.hostname.is_empty() {
@@ -1250,6 +1788,46 @@ fn taildrive_device_row(
     } else {
         device.id.clone()
     };
+    let change_profile_id = profile_id.clone();
+    let change_device_id = device.id.clone();
+    let enter_profile_id = profile_id.clone();
+    let enter_device_id = device.id.clone();
+    let apply_profile_id = profile_id.clone();
+    let apply_device_id = device.id.clone();
+    let reset_profile_id = profile_id;
+    let reset_device_id = device.id.clone();
+    let name_input = settings_text_input(
+        path_name,
+        "device",
+        move |state, value| {
+            state.edit_taildrive_device_name(&change_profile_id, &change_device_id, value)
+        },
+        move |state, value| {
+            state.apply_taildrive_device_name_edit(&enter_profile_id, &enter_device_id, value)
+        },
+        palette,
+    );
+    let name_control = flex_row((
+        sized_box(name_input).expand_width().flex(1.0),
+        FlexSpacer::Fixed(6.px()),
+        toolbar_button(
+            "Apply",
+            false,
+            move |state| {
+                state.apply_taildrive_device_name_draft(&apply_profile_id, &apply_device_id)
+            },
+            palette,
+        ),
+        FlexSpacer::Fixed(4.px()),
+        toolbar_button(
+            "Auto",
+            false,
+            move |state| state.reset_taildrive_device_name(&reset_profile_id, &reset_device_id),
+            palette,
+        ),
+    ))
+    .gap(0.px())
+    .cross_axis_alignment(CrossAxisAlignment::Center);
     let endpoint = if !device.dns_name.is_empty() {
         device.dns_name.clone()
     } else {
@@ -1273,9 +1851,15 @@ fn taildrive_device_row(
 
     sized_box(
         flex_col((
-            label(display_name).text_size(13.0).color(palette.text),
-            FlexSpacer::Fixed(2.px()),
-            prose(detail).text_size(11.0).text_color(palette.muted),
+            settings_row("Device path name", name_control, palette),
+            FlexSpacer::Fixed(3.px()),
+            prose("Type freely, then press Enter or Apply. Auto removes the override; open TailDrive tabs and history keep their internal device ID.")
+                .text_size(11.0)
+                .text_color(palette.muted),
+            FlexSpacer::Fixed(3.px()),
+            prose(format!("Tailscale: {display_name} · {detail}"))
+                .text_size(11.0)
+                .text_color(palette.muted),
             FlexSpacer::Fixed(2.px()),
             prose(shares).text_size(11.0).text_color(palette.text),
         ))
@@ -1526,6 +2110,7 @@ pub fn address_bar(state: &AppState) -> impl WidgetView<AppState> + use<> {
         .cross_axis_alignment(CrossAxisAlignment::Center),
     ))
     .height(Layout::TOOL_HEIGHT.px())
+    .expand_width()
     .flex(1.0);
     // Settings is structural navigation, not overflow content. Keep it pinned to
     // the physical right edge even when the navigation group needs to scroll.
@@ -1541,7 +2126,8 @@ pub fn address_bar(state: &AppState) -> impl WidgetView<AppState> + use<> {
             ),
         ))
         .gap(0.px())
-        .cross_axis_alignment(CrossAxisAlignment::Center),
+        .cross_axis_alignment(CrossAxisAlignment::Center)
+        .must_fill_major_axis(true),
     )
     .height(Layout::TOOL_HEIGHT.px())
     .expand_width();
@@ -1551,11 +2137,7 @@ pub fn address_bar(state: &AppState) -> impl WidgetView<AppState> + use<> {
         .iter()
         .cloned()
         .map(|path| {
-            let label_text = path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .filter(|name| !name.is_empty())
-                .unwrap_or_else(|| crate::app::display_path(&path));
+            let label_text = state.path_label_for(&path);
             toolbar_button(
                 label_text,
                 false,
@@ -1739,6 +2321,12 @@ pub fn file_action_bar(state: &AppState) -> impl WidgetView<AppState> + use<> {
                 AppState::copy_selected,
                 palette,
             ),
+            toolbar_button(
+                "Copy path",
+                !has_selection,
+                AppState::copy_selected_path_to_system_clipboard,
+                palette,
+            ),
             toolbar_button("Paste", !state.can_paste(), AppState::paste, palette),
             FlexSpacer::Fixed(4.px()),
             toolbar_button(
@@ -1766,7 +2354,7 @@ pub fn file_action_bar(state: &AppState) -> impl WidgetView<AppState> + use<> {
             icon_button(
                 LucideIcon::Ellipsis,
                 "More file actions",
-                true,
+                false,
                 AppState::toggle_file_more_popup,
                 palette,
             ),
@@ -1798,6 +2386,12 @@ pub fn file_action_bar(state: &AppState) -> impl WidgetView<AppState> + use<> {
                 palette,
             ),
             toolbar_button(
+                "Copy path",
+                !has_selection,
+                AppState::copy_selected_path_to_system_clipboard,
+                palette,
+            ),
+            toolbar_button(
                 "Rename",
                 read_only || !has_selection,
                 AppState::begin_rename,
@@ -1823,7 +2417,7 @@ pub fn file_action_bar(state: &AppState) -> impl WidgetView<AppState> + use<> {
             icon_button(
                 LucideIcon::Ellipsis,
                 "More file actions",
-                true,
+                false,
                 AppState::toggle_file_more_popup,
                 palette,
             ),
@@ -1850,6 +2444,7 @@ struct MobileActionVisibility {
     new_folder: bool,
     cut: bool,
     copy: bool,
+    copy_path: bool,
     paste: bool,
     rename: bool,
     delete: bool,
@@ -1858,12 +2453,13 @@ struct MobileActionVisibility {
     pin: bool,
 }
 
-#[cfg(any(target_os = "android", test))]
+#[cfg(test)]
 impl MobileActionVisibility {
     fn has_overflow(self) -> bool {
         !(self.new_folder
             && self.cut
             && self.copy
+            && self.copy_path
             && self.paste
             && self.rename
             && self.delete
@@ -1878,30 +2474,31 @@ fn mobile_action_visibility(capacity: usize) -> MobileActionVisibility {
     MobileActionVisibility {
         sort: capacity >= 1,
         copy: capacity >= 2,
-        paste: capacity >= 3,
-        delete: capacity >= 4,
-        cut: capacity >= 5,
-        new_folder: capacity >= 6,
-        rename: capacity >= 7,
-        share: capacity >= 8,
-        pin: capacity >= 9,
+        copy_path: capacity >= 3,
+        paste: capacity >= 4,
+        delete: capacity >= 5,
+        cut: capacity >= 6,
+        new_folder: capacity >= 7,
+        rename: capacity >= 8,
+        share: capacity >= 9,
+        pin: capacity >= 10,
     }
 }
 
 #[cfg(test)]
 #[test]
 fn mobile_action_visibility_progressively_overflows() {
-    let full = mobile_action_visibility(9);
+    let full = mobile_action_visibility(10);
     assert!(!full.has_overflow());
-    assert!(full.sort && full.share && full.pin);
+    assert!(full.sort && full.share && full.pin && full.copy_path);
 
-    let normal_phone = mobile_action_visibility(8);
-    assert!(normal_phone.sort && normal_phone.share);
+    let normal_phone = mobile_action_visibility(9);
+    assert!(normal_phone.sort && normal_phone.share && normal_phone.copy_path);
     assert!(!normal_phone.pin);
     assert!(normal_phone.has_overflow());
 
-    let medium = mobile_action_visibility(4);
-    assert!(medium.copy && medium.paste && medium.delete && medium.sort);
+    let medium = mobile_action_visibility(5);
+    assert!(medium.copy && medium.copy_path && medium.paste && medium.delete && medium.sort);
     assert!(!medium.cut && !medium.new_folder && !medium.rename && !medium.share && !medium.pin);
 
     let sort_only = mobile_action_visibility(1);
@@ -1955,6 +2552,18 @@ pub fn file_action_bar(state: &AppState) -> impl WidgetView<AppState> + use<> {
                 "Copy",
                 !clipboard_selected,
                 AppState::copy_selected,
+                palette,
+            )
+            .boxed(),
+        );
+    }
+    if visible.copy_path {
+        actions.push(
+            file_action_icon_button(
+                LucideIcon::FileText,
+                "Copy path",
+                !has_selection,
+                AppState::copy_selected_path_to_system_clipboard,
                 palette,
             )
             .boxed(),
@@ -2046,7 +2655,7 @@ pub fn file_action_bar(state: &AppState) -> impl WidgetView<AppState> + use<> {
         file_action_icon_button(
             LucideIcon::Ellipsis,
             "More file actions",
-            !visible.has_overflow(),
+            false,
             AppState::toggle_file_more_popup,
             palette,
         ),
@@ -2100,17 +2709,10 @@ pub fn sidebar(state: &AppState) -> impl WidgetView<AppState> + use<> {
         if items.iter().any(|(_, existing)| existing == path) {
             continue;
         }
-        let name = path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| crate::app::display_path(path));
+        let name = state.path_label_for(path);
         items.push((name, path.clone()));
     }
-    items.push((
-        "TailDrive".to_owned(),
-        taildrive_path(&TaildriveLocation::Root),
-    ));
+    items.push(("TD".to_owned(), taildrive_path(&TaildriveLocation::Root)));
 
     let buttons = items
         .into_iter()
@@ -2360,7 +2962,7 @@ pub fn status_bar(state: &AppState) -> impl WidgetView<AppState> + use<> {
     let right = if tab.search_active {
         format!("{} search", state.search_mode_label())
     } else {
-        crate::app::display_path(&tab.current_dir)
+        state.display_path_for(&tab.current_dir)
     };
     sized_box(
         flex_row((
@@ -2710,8 +3312,19 @@ fn quick_path_button(
 
 struct TabItemSpec {
     index: usize,
+    source_group: Option<u64>,
     drag_index: usize,
+    tab_ids: Vec<u64>,
+    tab_groups: Vec<Option<u64>>,
+    tab_slot_indices: Vec<usize>,
     drop_targets: Vec<usize>,
+    group_spans: Vec<TabDropGroupSpan>,
+    slot_index: usize,
+    slot_widths: Vec<f64>,
+    slot_centers: Vec<f64>,
+    preview_handle: TabStripDragPreviewHandle,
+    preview_active: bool,
+    new_group_borders: Vec<Color>,
     tab_id: u64,
     title: String,
     active: bool,
@@ -2725,8 +3338,19 @@ struct TabItemSpec {
 fn tab_item(spec: TabItemSpec, palette: ThemePalette) -> impl WidgetView<AppState> {
     let TabItemSpec {
         index,
+        source_group,
         drag_index,
+        tab_ids,
+        tab_groups,
+        tab_slot_indices,
         drop_targets,
+        group_spans,
+        slot_index,
+        slot_widths,
+        slot_centers,
+        preview_handle,
+        preview_active,
+        new_group_borders,
         tab_id,
         title,
         active,
@@ -2744,10 +3368,10 @@ fn tab_item(spec: TabItemSpec, palette: ThemePalette) -> impl WidgetView<AppStat
     let accessibility_label = title.clone();
     let content = sized_box(
         flex_row((sized_box(
-            prose(title)
-                .line_break_mode(LineBreaking::Clip)
+            label(title)
                 .text_size(13.0)
-                .text_color(palette.text),
+                .color(palette.text)
+                .line_break_mode(LineBreaking::Clip),
         )
         .flex(1.0),))
         .gap(0.px()),
@@ -2774,16 +3398,29 @@ fn tab_item(spec: TabItemSpec, palette: ThemePalette) -> impl WidgetView<AppStat
         TabDragConfig {
             tab_id,
             source_index: index,
+            source_group,
             drag_index,
             tab_widths,
             tab_centers,
+            tab_ids,
+            tab_groups,
+            tab_slot_indices,
             drop_targets,
+            group_spans,
+            slot_index,
+            slot_widths,
+            slot_centers,
+            preview_handle,
+            preview_active,
             scroll_leading,
             drag_handle_right_inset: Layout::TAB_CLOSE_WIDTH,
             accessibility_label,
             selected: active,
             background,
             border: border_color,
+            ungrouped_border: palette.border_strong,
+            new_group_borders,
+            armed_border: palette.accent,
             text_color: palette.text,
         },
     );
@@ -2990,25 +3627,22 @@ fn transfer_progress_button(
     state: &AppState,
     palette: ThemePalette,
 ) -> impl WidgetView<AppState> + use<> {
-    let Some(transfer) = state.oldest_transfer_for_icon() else {
-        // Always reserve the transfer slot. Otherwise starting the first transfer
-        // inserts a new control into the navigation row and shifts the whole UI.
-        return Either::A(
-            sized_box(label(""))
-                .width(Layout::NAV_WIDTH.px())
-                .height(Layout::TOOL_HEIGHT.px()),
-        );
-    };
-    let raw_fraction = transfer.fraction();
-    let fraction = if !transfer.done && raw_fraction == 0.0 {
-        0.08
-    } else {
-        raw_fraction
-    };
-    let progress_color = if transfer.error.is_some() {
-        palette.muted
-    } else {
-        palette.accent
+    let (fraction, progress_color) = match state.oldest_transfer_for_icon() {
+        Some(transfer) => {
+            let raw_fraction = transfer.fraction();
+            let fraction = if !transfer.done && raw_fraction == 0.0 {
+                0.08
+            } else {
+                raw_fraction
+            };
+            let progress_color = if transfer.error.is_some() {
+                palette.muted
+            } else {
+                palette.accent
+            };
+            (fraction, progress_color)
+        }
+        None => (0.0, palette.muted),
     };
     let ring = progress_ring(
         fraction,
@@ -3017,19 +3651,17 @@ fn transfer_progress_button(
         18.0,
         "File transfers",
     );
-    Either::B(
-        sized_box(
-            button(ring, AppState::toggle_transfer_popup)
-                .padding(5.0)
-                .background_color(palette.chrome)
-                .active_background_color(palette.accent_soft)
-                .border(palette.chrome, 1.0)
-                .hovered_border_color(palette.border_strong)
-                .corner_radius(Layout::RADIUS),
-        )
-        .width(Layout::NAV_WIDTH.px())
-        .height(Layout::TOOL_HEIGHT.px()),
+    sized_box(
+        button(ring, AppState::toggle_transfer_popup)
+            .padding(5.0)
+            .background_color(palette.chrome)
+            .active_background_color(palette.accent_soft)
+            .border(palette.chrome, 1.0)
+            .hovered_border_color(palette.border_strong)
+            .corner_radius(Layout::RADIUS),
     )
+    .width(Layout::NAV_WIDTH.px())
+    .height(Layout::TOOL_HEIGHT.px())
 }
 
 fn sort_menu_choice_button(
@@ -3064,7 +3696,11 @@ fn sort_menu_choice_button(
         .hovered_border_color(palette.border_strong)
         .corner_radius(Layout::RADIUS),
     )
-    .height(34.px())
+    .height(if cfg!(target_os = "android") {
+        48.px()
+    } else {
+        34.px()
+    })
     .expand_width()
 }
 
@@ -3121,7 +3757,6 @@ fn sort_order_controls(
     .cross_axis_alignment(CrossAxisAlignment::Fill)
 }
 
-#[cfg(target_os = "android")]
 fn menu_item_button(
     kind: LucideIcon,
     text: &'static str,
@@ -3153,7 +3788,11 @@ fn menu_item_button(
             .hovered_border_color(palette.border_strong)
             .corner_radius(Layout::RADIUS),
     )
-    .height(36.px())
+    .height(if cfg!(target_os = "android") {
+        48.px()
+    } else {
+        36.px()
+    })
     .expand_width()
 }
 
@@ -3194,7 +3833,11 @@ fn tab_popup_button(
             .hovered_border_color(palette.border_strong)
             .corner_radius(Layout::RADIUS),
     )
-    .height(36.px())
+    .height(if cfg!(target_os = "android") {
+        48.px()
+    } else {
+        36.px()
+    })
     .expand_width()
 }
 
@@ -3229,8 +3872,16 @@ fn tab_group_color_button(
         .hovered_border_color(palette.border_strong)
         .corner_radius(15.0),
     )
-    .width(28.px())
-    .height(32.px())
+    .width(if cfg!(target_os = "android") {
+        48.px()
+    } else {
+        28.px()
+    })
+    .height(if cfg!(target_os = "android") {
+        48.px()
+    } else {
+        32.px()
+    })
 }
 
 fn tab_group_editor_card(
@@ -3257,14 +3908,24 @@ fn tab_group_editor_card(
     let close_id = group_id;
     let card = sized_box(
         flex_col((
-            sized_box(name_input).height(36.px()).expand_width(),
+            sized_box(name_input)
+                .height(if cfg!(target_os = "android") {
+                    48.px()
+                } else {
+                    36.px()
+                })
+                .expand_width(),
             FlexSpacer::Fixed(8.px()),
             sized_box(portal(
                 flex_row(colors)
                     .gap(2.px())
                     .cross_axis_alignment(CrossAxisAlignment::Center),
             ))
-            .height(36.px())
+            .height(if cfg!(target_os = "android") {
+                48.px()
+            } else {
+                36.px()
+            })
             .expand_width(),
             FlexSpacer::Fixed(8.px()),
             tab_popup_button(
@@ -3352,9 +4013,22 @@ fn tab_context_card(
             .boxed(),
         );
     }
-    if current_group.is_some() {
+    if let Some(group_id) = current_group {
+        let rename_group_id = group_id;
         let remove_id = tab_id;
         items.push(sized_box(label("")).height(5.px()).boxed());
+        items.push(
+            tab_popup_button(
+                "Rename group".to_owned(),
+                state
+                    .tab_group(group_id)
+                    .map(|group| tab_group_color(group.color())),
+                false,
+                move |state| state.open_tab_group_editor(rename_group_id),
+                palette,
+            )
+            .boxed(),
+        );
         items.push(
             tab_popup_button(
                 "Remove from group".to_owned(),
@@ -3461,11 +4135,7 @@ pub fn file_more_overlay(state: &AppState) -> impl WidgetView<AppState> + use<> 
     let palette = state.palette();
     #[cfg(target_os = "android")]
     let visible = mobile_action_visibility(state.mobile_primary_action_capacity());
-    #[cfg(target_os = "android")]
-    let has_overflow = visible.has_overflow();
-    #[cfg(not(target_os = "android"))]
-    let has_overflow = false;
-    if !state.file_more_popup_open() || !has_overflow {
+    if !state.file_more_popup_open() {
         return Either::A(sized_box(label("")).width(0.px()).height(0.px()));
     }
 
@@ -3478,7 +4148,19 @@ pub fn file_more_overlay(state: &AppState) -> impl WidgetView<AppState> + use<> 
     #[cfg(target_os = "android")]
     let mut items: Vec<Box<AnyWidgetView<AppState>>> = Vec::new();
     #[cfg(not(target_os = "android"))]
-    let items: Vec<Box<AnyWidgetView<AppState>>> = Vec::new();
+    let items: Vec<Box<AnyWidgetView<AppState>>> = vec![
+        menu_item_button(
+            LucideIcon::Settings,
+            "Action guide",
+            false,
+            |state| {
+                state.close_file_more_popup();
+                state.open_action_guide();
+            },
+            palette,
+        )
+        .boxed(),
+    ];
 
     #[cfg(target_os = "android")]
     {
@@ -3526,6 +4208,21 @@ pub fn file_more_overlay(state: &AppState) -> impl WidgetView<AppState> + use<> 
                     |state| {
                         state.close_file_more_popup();
                         state.copy_selected();
+                    },
+                    palette,
+                )
+                .boxed(),
+            );
+        }
+        if !visible.copy_path {
+            items.push(
+                menu_item_button(
+                    LucideIcon::FileText,
+                    "Copy path",
+                    !has_selection,
+                    |state| {
+                        state.close_file_more_popup();
+                        state.copy_selected_path_to_system_clipboard();
                     },
                     palette,
                 )
@@ -3611,6 +4308,19 @@ pub fn file_more_overlay(state: &AppState) -> impl WidgetView<AppState> + use<> 
                 .boxed(),
             );
         }
+        items.push(
+            menu_item_button(
+                LucideIcon::Settings,
+                "Action guide",
+                false,
+                |state| {
+                    state.close_file_more_popup();
+                    state.open_action_guide();
+                },
+                palette,
+            )
+            .boxed(),
+        );
     }
 
     let menu = sized_box(
@@ -3845,7 +4555,7 @@ pub fn paste_conflict_overlay(state: &AppState) -> impl WidgetView<AppState> + u
 
 pub fn transfer_popup(state: &AppState) -> impl WidgetView<AppState> + use<> {
     let palette = state.palette();
-    if !state.transfer_popup_open() || state.file_transfers().is_empty() {
+    if !state.transfer_popup_open() {
         return Either::A(sized_box(label("")).width(0.px()).height(0.px()));
     }
 
@@ -3856,10 +4566,15 @@ pub fn transfer_popup(state: &AppState) -> impl WidgetView<AppState> + use<> {
         .into_iter()
         .map(|transfer| transfer_popup_row(transfer, palette))
         .collect::<Vec<_>>();
-    let summary = match active_count {
-        0 => "No active transfers".to_owned(),
-        1 => "1 active".to_owned(),
-        count => format!("{count} active"),
+    let is_empty = rows.is_empty();
+    let summary = if is_empty {
+        "No transfers".to_owned()
+    } else {
+        match active_count {
+            0 => "No active transfers".to_owned(),
+            1 => "1 active".to_owned(),
+            count => format!("{count} active"),
+        }
     };
     let list_height = (state.file_transfers().len() as f64 * 56.0).clamp(56.0, 336.0);
 
@@ -3889,10 +4604,24 @@ pub fn transfer_popup(state: &AppState) -> impl WidgetView<AppState> + use<> {
     )
     .expand_width();
 
-    let card = sized_box(
-        flex_col((
-            header,
-            FlexSpacer::Fixed(4.px()),
+    let transfer_list = if is_empty {
+        Either::A(
+            sized_box(
+                flex_col((
+                    FlexSpacer::Flex(1.0),
+                    label("No transfers yet")
+                        .text_size(12.0)
+                        .color(palette.muted),
+                    FlexSpacer::Flex(1.0),
+                ))
+                .gap(0.px())
+                .cross_axis_alignment(CrossAxisAlignment::Center),
+            )
+            .height(list_height.px())
+            .expand_width(),
+        )
+    } else {
+        Either::B(
             sized_box(portal(
                 flex_col(rows)
                     .gap(2.px())
@@ -3900,13 +4629,14 @@ pub fn transfer_popup(state: &AppState) -> impl WidgetView<AppState> + use<> {
             ))
             .height(list_height.px())
             .expand_width(),
-        ))
-        .gap(0.px()),
-    )
-    .padding(8.0)
-    .background_color(palette.surface)
-    .border(palette.border_strong, 1.0)
-    .corner_radius(8.0);
+        )
+    };
+
+    let card = sized_box(flex_col((header, FlexSpacer::Fixed(4.px()), transfer_list)).gap(0.px()))
+        .padding(8.0)
+        .background_color(palette.surface)
+        .border(palette.border_strong, 1.0)
+        .corner_radius(8.0);
     #[cfg(target_os = "android")]
     let card = {
         let available = state.mobile_overlay_width(380.0);
@@ -3916,21 +4646,27 @@ pub fn transfer_popup(state: &AppState) -> impl WidgetView<AppState> + use<> {
     #[cfg(not(target_os = "android"))]
     let card = sized_box(card).width(384.px());
 
-    let top_offset = Layout::TAB_HEIGHT + 6.0;
-    Either::B(
-        sized_box(
-            flex_col((FlexSpacer::Fixed(top_offset.px()), card))
-                .gap(0.px())
-                .cross_axis_alignment(CrossAxisAlignment::End),
-        )
-        .expand_width()
-        .padding(Padding {
-            left: 8.0,
-            right: 8.0,
-            top: 0.0,
-            bottom: 0.0,
-        }),
+    let backdrop = sized_box(
+        button(label(""), AppState::close_transfer_popup)
+            .background_color(Color::TRANSPARENT)
+            .active_background_color(Color::TRANSPARENT)
+            .border_color(Color::TRANSPARENT),
     )
+    .expand();
+    let top_offset = Layout::TAB_HEIGHT + 6.0;
+    let anchored = sized_box(
+        flex_col((FlexSpacer::Fixed(top_offset.px()), card))
+            .gap(0.px())
+            .cross_axis_alignment(CrossAxisAlignment::End),
+    )
+    .expand_width()
+    .padding(Padding {
+        left: 8.0,
+        right: 8.0,
+        top: 0.0,
+        bottom: 0.0,
+    });
+    Either::B(sized_box(zstack((backdrop, anchored.alignment(UnitPoint::TOP_RIGHT)))).expand())
 }
 
 fn compact_icon_button(
@@ -3956,8 +4692,16 @@ fn compact_icon_button(
             .hovered_border_color(palette.border_strong)
             .corner_radius(Layout::RADIUS),
     )
-    .width(34.px())
-    .height(34.px())
+    .width(if cfg!(target_os = "android") {
+        48.px()
+    } else {
+        34.px()
+    })
+    .height(if cfg!(target_os = "android") {
+        48.px()
+    } else {
+        34.px()
+    })
 }
 
 #[cfg(target_os = "android")]
@@ -4108,7 +4852,7 @@ fn file_action_icon_button(
             .hovered_border_color(palette.border_strong)
             .corner_radius(Layout::RADIUS),
     )
-    .width(37.px())
+    .width(48.px())
     .height(Layout::TOOL_HEIGHT.px())
 }
 

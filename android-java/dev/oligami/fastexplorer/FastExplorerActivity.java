@@ -4,8 +4,15 @@ import com.google.androidgamesdk.GameActivity;
 import androidx.core.content.FileProvider;
 import androidx.core.view.WindowCompat;
 import android.Manifest;
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.content.ActivityNotFoundException;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Intent;
+import android.content.pm.PackageInstaller;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.net.ConnectivityManager;
@@ -48,17 +55,26 @@ public final class FastExplorerActivity extends GameActivity {
     private static final int INSTALL_REQUEST_CODE_BASE = 3002;
     private static final int NOTIFICATION_PERMISSION_REQUEST_CODE = 3003;
     private static final int INSTALL_REQUEST_CODE_MAX = 60000;
+    private static final String ACTION_FAST_EXPLORER_SYNC =
+            "dev.oligami.fastexplorer.action.OPEN_DEVICE_SYNC";
+    private static final String ACTION_APKS_INSTALL_STATUS =
+            "dev.oligami.fastexplorer.action.APKS_INSTALL_STATUS";
+    private static final String EXTRA_APKS_WORK_DIR =
+            "dev.oligami.fastexplorer.extra.APKS_WORK_DIR";
     private final ConcurrentLinkedDeque<String> pendingInstallPaths = new ConcurrentLinkedDeque<>();
     private volatile String activeInstallPath;
     private volatile boolean activeInstallPaused;
+    private volatile boolean activeInstallUsesSession;
     private volatile int activeInstallRequestCode = -1;
     private int nextInstallRequestCode = INSTALL_REQUEST_CODE_BASE;
+    private int nextApksCallbackRequestCode = 70001;
     private boolean unknownSourceSettingsOpen;
     private final ExecutorService aabInstallerExecutor = Executors.newSingleThreadExecutor();
 
     private static native void nativeBackPressed();
     private static native void nativeActivityResumed();
     private static native void nativeActivityPaused();
+    private static native void nativeSyncNotificationOpened();
 
     @Override
     protected void onCreate(Bundle state) {
@@ -75,6 +91,24 @@ public final class FastExplorerActivity extends GameActivity {
                     OnBackInvokedDispatcher.PRIORITY_DEFAULT, backCallback);
         }
         startNetworkSnapshotter();
+        FastExplorerPush.initialize(this);
+        handleApksInstallStatus(getIntent());
+        handleFastExplorerSyncIntent(getIntent());
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        handleApksInstallStatus(intent);
+        handleFastExplorerSyncIntent(intent);
+    }
+
+    private void handleFastExplorerSyncIntent(Intent intent) {
+        if (intent != null && ACTION_FAST_EXPLORER_SYNC.equals(intent.getAction())) {
+            nativeSyncNotificationOpened();
+            intent.setAction(null);
+        }
     }
 
     @Override
@@ -87,7 +121,7 @@ public final class FastExplorerActivity extends GameActivity {
                     || getPackageManager().canRequestPackageInstalls()) {
                 getWindow().getDecorView().post(this::drainInstallQueue);
             }
-        } else if (activeInstallPath != null && activeInstallPaused) {
+        } else if (activeInstallPath != null && activeInstallPaused && !activeInstallUsesSession) {
             // Some OEM package installers do not reliably return an activity result.
             // Give onActivityResult a chance to run first, then release the serialized
             // installer slot if the external installer has already returned to us.
@@ -139,6 +173,51 @@ public final class FastExplorerActivity extends GameActivity {
 
     public void backgroundFastExplorerTask() {
         moveTaskToBack(true);
+    }
+
+    public void setFastExplorerClipboardText(String text) {
+        ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+        clipboard.setPrimaryClip(ClipData.newPlainText("FastExplorer", text == null ? "" : text));
+    }
+
+    public String getFastExplorerClipboardText() {
+        ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+        if (!clipboard.hasPrimaryClip() || clipboard.getPrimaryClip() == null
+                || clipboard.getPrimaryClip().getItemCount() == 0) {
+            return "";
+        }
+        CharSequence value = clipboard.getPrimaryClip().getItemAt(0).coerceToText(this);
+        return value == null ? "" : value.toString();
+    }
+
+    public void ensureFastExplorerNotificationPermission() {
+        if (Build.VERSION.SDK_INT < 33
+                || checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                        == PackageManager.PERMISSION_GRANTED) {
+            return;
+        }
+        android.content.SharedPreferences prefs = getSharedPreferences(
+                "fast_explorer_permissions", MODE_PRIVATE);
+        if (!prefs.getBoolean("notification_prompted", false)) {
+            prefs.edit().putBoolean("notification_prompted", true).apply();
+            requestPermissions(
+                    new String[] { Manifest.permission.POST_NOTIFICATIONS },
+                    NOTIFICATION_PERMISSION_REQUEST_CODE);
+        }
+    }
+
+    public String getFastExplorerFcmToken() {
+        return FastExplorerPush.cachedToken(this);
+    }
+
+    public void notifyFastExplorerIncomingSync(String title, String detail) {
+        if (Build.VERSION.SDK_INT >= 33
+                && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                        != PackageManager.PERMISSION_GRANTED) {
+            ensureFastExplorerNotificationPermission();
+            return;
+        }
+        FastExplorerPush.showNotification(this, title, detail);
     }
 
     public void startFastExplorerTransferService() {
@@ -250,6 +329,7 @@ public final class FastExplorerActivity extends GameActivity {
         String path = activeInstallPath;
         activeInstallPath = null;
         activeInstallPaused = false;
+        activeInstallUsesSession = false;
         activeInstallRequestCode = -1;
         if (path != null && isGeneratedAabInstallPath(path)) {
             new File(path).delete();
@@ -289,9 +369,15 @@ public final class FastExplorerActivity extends GameActivity {
         }
         try {
             File file = resolveFastExplorerShareableFile(path);
-            Uri uri = FileProvider.getUriForFile(this, getPackageName() + ".files", file);
+            String lowerName = file.getName().toLowerCase(Locale.ROOT);
             activeInstallPath = path;
             activeInstallPaused = false;
+            if (lowerName.endsWith(".apks")) {
+                activeInstallUsesSession = true;
+                prepareApksForInstall(file);
+                return;
+            }
+            Uri uri = FileProvider.getUriForFile(this, getPackageName() + ".files", file);
             int requestCode = nextInstallRequestCode;
             nextInstallRequestCode++;
             if (nextInstallRequestCode > INSTALL_REQUEST_CODE_MAX) {
@@ -307,6 +393,125 @@ public final class FastExplorerActivity extends GameActivity {
             releaseActiveInstall();
             android.util.Log.e("FastExplorer", "cannot install FastExplorer APK", error);
             getWindow().getDecorView().post(this::drainInstallQueue);
+        }
+    }
+
+    private void prepareApksForInstall(File archive) {
+        Toast.makeText(this, "Preparing APKS for installation…", Toast.LENGTH_SHORT).show();
+        aabInstallerExecutor.execute(() -> {
+            try {
+                FastExplorerApksInstaller.PreparedInstall prepared =
+                        FastExplorerApksInstaller.prepare(this, archive);
+                runOnUiThread(() -> commitPreparedApksInstall(prepared));
+            } catch (Exception error) {
+                android.util.Log.e("FastExplorer", "cannot prepare APKS for installation", error);
+                runOnUiThread(() -> {
+                    releaseActiveInstall();
+                    if (!isFinishing() && !isDestroyed()) {
+                        Toast.makeText(
+                                this,
+                                "Cannot install APKS: " + error.getMessage(),
+                                Toast.LENGTH_LONG).show();
+                        drainInstallQueue();
+                    }
+                });
+            }
+        });
+    }
+
+    private void commitPreparedApksInstall(FastExplorerApksInstaller.PreparedInstall prepared) {
+        if (isFinishing() || isDestroyed()) {
+            FastExplorerApksInstaller.deleteRecursively(prepared.workingDirectory);
+            releaseActiveInstall();
+            return;
+        }
+        try {
+            Intent statusIntent = new Intent(this, FastExplorerActivity.class)
+                    .setAction(ACTION_APKS_INSTALL_STATUS)
+                    .putExtra(EXTRA_APKS_WORK_DIR, prepared.workingDirectory.getAbsolutePath())
+                    .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+            int pendingIntentFlags = PendingIntent.FLAG_UPDATE_CURRENT;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                pendingIntentFlags |= PendingIntent.FLAG_MUTABLE;
+            }
+            int requestCode = nextApksCallbackRequestCode++;
+            if (nextApksCallbackRequestCode == Integer.MAX_VALUE) {
+                nextApksCallbackRequestCode = 70001;
+            }
+            PendingIntent status = PendingIntent.getActivity(
+                    this, requestCode, statusIntent, pendingIntentFlags);
+            FastExplorerApksInstaller.commit(this, prepared, status.getIntentSender());
+        } catch (Exception error) {
+            FastExplorerApksInstaller.deleteRecursively(prepared.workingDirectory);
+            releaseActiveInstall();
+            android.util.Log.e("FastExplorer", "cannot commit APKS installation", error);
+            Toast.makeText(
+                    this,
+                    "Cannot install APKS: " + error.getMessage(),
+                    Toast.LENGTH_LONG).show();
+            drainInstallQueue();
+        }
+    }
+
+    private void handleApksInstallStatus(Intent intent) {
+        if (intent == null || !ACTION_APKS_INSTALL_STATUS.equals(intent.getAction())) {
+            return;
+        }
+        String workDir = intent.getStringExtra(EXTRA_APKS_WORK_DIR);
+        if (!FastExplorerApksInstaller.isWorkingDirectory(this, workDir)) {
+            android.util.Log.w("FastExplorer", "Ignoring invalid APKS install callback");
+            return;
+        }
+        int status = intent.getIntExtra(
+                PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE);
+        if (status == PackageInstaller.STATUS_PENDING_USER_ACTION) {
+            Intent confirmation;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                confirmation = intent.getParcelableExtra(Intent.EXTRA_INTENT, Intent.class);
+            } else {
+                confirmation = intent.getParcelableExtra(Intent.EXTRA_INTENT);
+            }
+            if (confirmation != null) {
+                try {
+                    startActivity(confirmation);
+                    return;
+                } catch (ActivityNotFoundException error) {
+                    android.util.Log.e("FastExplorer", "cannot open APKS confirmation", error);
+                }
+            }
+            status = PackageInstaller.STATUS_FAILURE;
+        }
+
+        FastExplorerApksInstaller.cleanupWorkingDirectory(this, workDir);
+        String statusMessage = intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE);
+        if (!isFinishing() && !isDestroyed()) {
+            String message = status == PackageInstaller.STATUS_SUCCESS
+                    ? "App installed"
+                    : apksInstallFailureMessage(status, statusMessage);
+            Toast.makeText(this, message, Toast.LENGTH_LONG).show();
+        }
+        releaseActiveInstall();
+        getWindow().getDecorView().post(this::drainInstallQueue);
+    }
+
+    private static String apksInstallFailureMessage(int status, String detail) {
+        switch (status) {
+            case PackageInstaller.STATUS_FAILURE_ABORTED:
+                return "APKS installation was cancelled";
+            case PackageInstaller.STATUS_FAILURE_BLOCKED:
+                return "APKS installation was blocked by Android";
+            case PackageInstaller.STATUS_FAILURE_CONFLICT:
+                return "Cannot install APKS: app signature or package conflicts";
+            case PackageInstaller.STATUS_FAILURE_INCOMPATIBLE:
+                return "Cannot install APKS: package is incompatible with this device";
+            case PackageInstaller.STATUS_FAILURE_INVALID:
+                return "Cannot install APKS: archive contains invalid or incomplete APKs";
+            case PackageInstaller.STATUS_FAILURE_STORAGE:
+                return "Cannot install APKS: not enough storage";
+            default:
+                return detail == null || detail.isBlank()
+                        ? "Cannot install APKS"
+                        : "Cannot install APKS: " + detail;
         }
     }
 
@@ -343,6 +548,14 @@ public final class FastExplorerActivity extends GameActivity {
             String lowerName = file.getName().toLowerCase(Locale.ROOT);
             if (lowerName.endsWith(".aab")) {
                 prepareAabForInstall(file);
+                return true;
+            }
+            if (lowerName.endsWith(".apks")) {
+                String installPath = file.getAbsolutePath();
+                getWindow().getDecorView().post(() -> {
+                    enqueueInstall(installPath);
+                    drainInstallQueue();
+                });
                 return true;
             }
             String mime = mimeForFile(file);

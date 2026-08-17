@@ -5,13 +5,15 @@
 
 use accesskit::{Node, Role};
 use tracing::{Span, trace_span, warn};
+use ui_events::pointer::PointerButton;
 use vello::Scene;
 use vello::kurbo::{Line, Point, Rect, Size};
 
 use crate::core::{
     AccessCtx, AccessEvent, Axis, BoxConstraints, ChildrenIds, CursorIcon, EventCtx, FromDynWidget,
-    LayoutCtx, NewWidget, NoAction, PaintCtx, PointerButtonEvent, PointerEvent, PointerUpdate,
-    PropertiesMut, PropertiesRef, QueryCtx, RegisterCtx, TextEvent, Widget, WidgetId, WidgetMut,
+    LayoutCtx, NewWidget, NoAction, PaintCtx, PointerButtonEvent, PointerEvent, PointerType,
+    PointerUpdate, PropertiesMut, PropertiesRef, QueryCtx, RegisterCtx, TextEvent, Widget, WidgetId,
+    WidgetMut,
     WidgetPod,
 };
 use crate::peniko::Color;
@@ -396,9 +398,20 @@ where
     ) {
         if self.draggable {
             match event {
-                PointerEvent::Down(PointerButtonEvent { state, .. }) => {
+                PointerEvent::Down(PointerButtonEvent {
+                    button: None | Some(PointerButton::Primary),
+                    pointer,
+                    state,
+                    ..
+                }) => {
                     let pos = ctx.local_position(state.position);
-                    if self.bar_hit_test(ctx.size(), pos) {
+                    let hit = if pointer.pointer_type == PointerType::Touch {
+                        let distance = self.split_axis.major_pos(pos) - self.bar_position(ctx.size());
+                        distance.abs() <= 12.0
+                    } else {
+                        self.bar_hit_test(ctx.size(), pos)
+                    };
+                    if hit {
                         ctx.set_handled();
                         ctx.capture_pointer();
                         // Save the delta between the mouse click position and the split point
@@ -410,6 +423,7 @@ where
                 }
                 PointerEvent::Move(PointerUpdate { current, .. }) => {
                     if ctx.is_active() {
+                        ctx.set_handled();
                         let pos = ctx.local_position(current.position);
                         // If widget has pointer capture, assume always it's hovered
                         let effective_pos = match self.split_axis {

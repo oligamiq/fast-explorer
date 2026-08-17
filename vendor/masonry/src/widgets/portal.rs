@@ -37,10 +37,13 @@ pub struct Portal<W: Widget + ?Sized> {
     must_fill: bool,
     scrollbar_horizontal: WidgetPod<ScrollBar>,
     scrollbar_horizontal_visible: bool,
+    horizontal_scrollbar_thumb_widths: Option<(f64, f64)>,
     scrollbar_vertical: WidgetPod<ScrollBar>,
     scrollbar_vertical_visible: bool,
     touch_pan: Option<(PointerId, Point, Point)>,
     pending_pan_to: Option<Rect>,
+    horizontal_anchor: Option<f64>,
+    horizontal_anchor_viewport_offset: Option<f64>,
 }
 
 // --- MARK: BUILDERS
@@ -57,10 +60,13 @@ impl<W: Widget + ?Sized> Portal<W> {
             // TODO - remove (TODO: why?)
             scrollbar_horizontal: WidgetPod::new(ScrollBar::new(Axis::Horizontal, 1.0, 1.0)),
             scrollbar_horizontal_visible: false,
+            horizontal_scrollbar_thumb_widths: None,
             scrollbar_vertical: WidgetPod::new(ScrollBar::new(Axis::Vertical, 1.0, 1.0)),
             scrollbar_vertical_visible: false,
             touch_pan: None,
             pending_pan_to: None,
+            horizontal_anchor: None,
+            horizontal_anchor_viewport_offset: None,
         }
     }
 
@@ -105,12 +111,38 @@ impl<W: Widget + ?Sized> Portal<W> {
         self
     }
 
+    /// Configure only the horizontal scrollbar's visual thumb thickness.
+    /// The scrollbar keeps its normal hit target, so a slim idle thumb remains easy to grab.
+    pub fn horizontal_scrollbar_thumb_widths(mut self, idle: f64, active: f64) -> Self {
+        self.horizontal_scrollbar_thumb_widths = Some((idle.max(1.0), active.max(idle.max(1.0))));
+        self
+    }
+
+    /// Keep a child-coordinate X position fixed in the viewport across relayouts.
+    /// This may temporarily leave blank space at the trailing edge when content shrinks.
+    pub fn horizontal_anchor(mut self, anchor: f64) -> Self {
+        self.horizontal_anchor = Some(anchor);
+        self.horizontal_anchor_viewport_offset = Some(anchor - self.viewport_pos.x);
+        self
+    }
+
     /// Request that `target`, expressed in child coordinates, is visible after
     /// the first layout. This is useful for scrollable tab strips whose active
     /// item may start outside the initial viewport.
     pub fn initial_pan_to(mut self, target: Rect) -> Self {
         self.pending_pan_to = Some(target);
         self
+    }
+}
+
+fn preserve_horizontal_anchor_x(
+    clamped_x: f64,
+    anchor: Option<f64>,
+    viewport_offset: Option<f64>,
+) -> f64 {
+    match (anchor, viewport_offset) {
+        (Some(anchor), Some(viewport_offset)) => (anchor - viewport_offset).max(0.0),
+        _ => clamped_x,
     }
 }
 
@@ -224,6 +256,30 @@ impl<W: Widget + FromDynWidget + ?Sized> Portal<W> {
         this.ctx.request_layout();
     }
 
+    /// Update the horizontal scrollbar's visual thumb thickness without changing its hit target.
+    pub fn set_horizontal_scrollbar_thumb_widths(
+        this: &mut WidgetMut<'_, Self>,
+        widths: Option<(f64, f64)>,
+    ) {
+        this.widget.horizontal_scrollbar_thumb_widths = widths.map(|(idle, active)| {
+            let idle = idle.max(1.0);
+            (idle, active.max(idle))
+        });
+        this.ctx.request_layout();
+        this.ctx.request_render();
+    }
+
+    /// Start or stop preserving a child-coordinate X position across relayouts.
+    pub fn set_horizontal_anchor(this: &mut WidgetMut<'_, Self>, anchor: Option<f64>) {
+        if this.widget.horizontal_anchor == anchor {
+            return;
+        }
+        this.widget.horizontal_anchor = anchor;
+        this.widget.horizontal_anchor_viewport_offset =
+            anchor.map(|anchor| anchor - this.widget.viewport_pos.x);
+        this.ctx.request_layout();
+    }
+
     /// Request that `target`, expressed in child coordinates, is revealed on
     /// the next layout pass. Delaying until layout guarantees current child and
     /// viewport sizes are available.
@@ -320,6 +376,8 @@ impl<W: Widget + FromDynWidget + ?Sized> Widget for Portal<W> {
                     let current = Point::new(current.position.x, current.position.y);
                     if (current - start).hypot2() > 1.0 {
                         self.pending_pan_to = None;
+                        self.horizontal_anchor = None;
+                        self.horizontal_anchor_viewport_offset = None;
                     }
                     self.set_viewport_pos_raw(
                         portal_size,
@@ -371,6 +429,8 @@ impl<W: Widget + FromDynWidget + ?Sized> Widget for Portal<W> {
             }
             PointerEvent::Scroll(PointerScrollEvent { delta, .. }) => {
                 self.pending_pan_to = None;
+                self.horizontal_anchor = None;
+                self.horizontal_anchor_viewport_offset = None;
                 // TODO - Remove reference to scale factor.
                 // See https://github.com/linebender/xilem/issues/1264
                 let delta = match delta {
@@ -448,6 +508,8 @@ impl<W: Widget + FromDynWidget + ?Sized> Widget for Portal<W> {
 
         if scrollbar_moved {
             self.pending_pan_to = None;
+            self.horizontal_anchor = None;
+            self.horizontal_anchor_viewport_offset = None;
             ctx.request_compose();
         }
     }
@@ -529,10 +591,18 @@ impl<W: Widget + FromDynWidget + ?Sized> Widget for Portal<W> {
 
         self.content_size = content_size;
 
-        // Recompute the portal offset for the new layout, then honor a pending
-        // reveal request now that both viewport and content sizes are known.
+        // Recompute the portal offset for the new layout. A horizontal anchor
+        // is allowed to extend past the normal trailing scroll limit so a tab
+        // group header does not jump when its members collapse near the right edge.
         self.set_viewport_pos_raw(portal_size, content_size, self.viewport_pos);
-        if let Some(target) = self.pending_pan_to {
+        self.viewport_pos.x = preserve_horizontal_anchor_x(
+            self.viewport_pos.x,
+            self.horizontal_anchor,
+            self.horizontal_anchor_viewport_offset,
+        );
+        if self.horizontal_anchor.is_none()
+            && let Some(target) = self.pending_pan_to
+        {
             // Xilem layouts can first visit a Portal while it is still effectively
             // unconstrained. Keep the reveal request until a real scroll range
             // exists; otherwise the request would be consumed before the final
@@ -564,10 +634,17 @@ impl<W: Widget + FromDynWidget + ?Sized> Widget for Portal<W> {
             scrollbar.portal_size = portal_size.width;
             scrollbar.content_size = content_size.width;
             scrollbar.cursor_progress = if content_size.width > portal_size.width {
-                self.viewport_pos.x / (content_size.width - portal_size.width)
+                (self.viewport_pos.x / (content_size.width - portal_size.width)).clamp(0.0, 1.0)
             } else {
                 0.0
             };
+            if let Some((idle, active)) = self.horizontal_scrollbar_thumb_widths {
+                scrollbar.idle_thumb_width = idle;
+                scrollbar.active_thumb_width = active;
+            } else {
+                scrollbar.idle_thumb_width = crate::theme::SCROLLBAR_WIDTH;
+                scrollbar.active_thumb_width = crate::theme::SCROLLBAR_WIDTH;
+            }
             // TODO - request paint for scrollbar?
 
             let scrollbar_size = ctx.run_layout(&mut self.scrollbar_horizontal, bc);
@@ -752,6 +829,18 @@ mod tests {
         assert!(repr[end..].chars().all(|c| c == '_'));
 
         (start as f64)..(end as f64)
+    }
+
+    #[test]
+    fn horizontal_anchor_preserves_viewport_past_new_trailing_limit() {
+        // A collapse can reduce the normal max viewport X from 250 to 100.
+        // The group header was at child X=350 and screen X=100, so keeping
+        // that screen position requires retaining viewport X=250 temporarily.
+        assert_eq!(
+            preserve_horizontal_anchor_x(100.0, Some(350.0), Some(100.0)),
+            250.0
+        );
+        assert_eq!(preserve_horizontal_anchor_x(100.0, None, None), 100.0);
     }
 
     #[test]

@@ -473,7 +473,7 @@ impl Layout {
     #[cfg(not(target_os = "android"))]
     pub const NAV_WIDTH: f64 = 32.0;
     #[cfg(target_os = "android")]
-    pub const NAV_WIDTH: f64 = 34.0;
+    pub const NAV_WIDTH: f64 = 48.0;
     #[cfg(not(target_os = "android"))]
     pub const RADIUS: f64 = 4.0;
     #[cfg(target_os = "android")]

@@ -311,7 +311,9 @@ fn is_android_install_name(name: &str) -> bool {
         .extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| {
-            extension.eq_ignore_ascii_case("apk") || extension.eq_ignore_ascii_case("aab")
+            extension.eq_ignore_ascii_case("apk")
+                || extension.eq_ignore_ascii_case("apks")
+                || extension.eq_ignore_ascii_case("aab")
         })
 }
 

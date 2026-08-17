@@ -6,13 +6,14 @@ use std::any::TypeId;
 use accesskit::{Node, Role};
 use masonry_core::core::HasProperty;
 use tracing::{Span, trace_span};
+use ui_events::pointer::PointerButton;
 use vello::Scene;
 use vello::kurbo::{Affine, Point, Rect, Size, Vec2};
 
 use crate::core::{
-    AccessCtx, ArcStr, BoxConstraints, ChildrenIds, ComposeCtx, LayoutCtx, NewWidget, NoAction,
-    PaintCtx, Properties, PropertiesMut, PropertiesRef, RegisterCtx, Update, UpdateCtx, Widget,
-    WidgetId, WidgetMut, WidgetPod,
+    AccessCtx, ArcStr, BoxConstraints, ChildrenIds, ComposeCtx, EventCtx, LayoutCtx, NewWidget,
+    NoAction, PaintCtx, PointerButtonEvent, PointerEvent, Properties, PropertiesMut, PropertiesRef,
+    RegisterCtx, Update, UpdateCtx, Widget, WidgetId, WidgetMut, WidgetPod,
 };
 use crate::properties::{
     Background, BorderColor, BorderWidth, BoxShadow, CaretColor, ContentColor, CornerRadius,
@@ -230,6 +231,44 @@ impl HasProperty<UnfocusedSelectionColor> for TextInput {}
 impl Widget for TextInput {
     type Action = NoAction;
 
+    fn on_pointer_event(
+        &mut self,
+        ctx: &mut EventCtx<'_>,
+        props: &mut PropertiesMut<'_>,
+        event: &PointerEvent,
+    ) {
+        if ctx.is_disabled() || self.child_focused || !self.marquee_when_unfocused {
+            return;
+        }
+        if let PointerEvent::Down(PointerButtonEvent {
+            button: None | Some(PointerButton::Primary),
+            state,
+            ..
+        }) = event
+        {
+            // The marquee moves the editable child for display. If the pointer lands in
+            // the exposed part of the field, the TextInput itself becomes the hit target.
+            // Convert that first press back into the child's unscrolled text coordinate
+            // before resetting the marquee, so editing starts at the character the user
+            // actually touched instead of requiring a second press.
+            let border = props.get::<BorderWidth>();
+            let padding = props.get::<Padding>();
+            let local = ctx.local_position(state.position);
+            let text_x = local.x - border.width - padding.left + self.scroll_x;
+
+            self.marquee_elapsed = 0.0;
+            self.scroll_x = 0.0;
+            ctx.set_focus(self.text.id());
+            {
+                let (text, mut text_ctx) = ctx.get_raw_mut(&mut self.text);
+                text.place_caret_from_parent(&mut text_ctx, text_x);
+            }
+            ctx.set_handled();
+            ctx.request_layout();
+            ctx.request_compose();
+        }
+    }
+
     fn on_anim_frame(
         &mut self,
         ctx: &mut UpdateCtx<'_>,
@@ -242,8 +281,7 @@ impl Widget for TextInput {
 
         self.marquee_elapsed += interval as f64 * 1e-9;
         let travel_seconds = self.max_scroll_x / MARQUEE_SPEED;
-        let cycle =
-            MARQUEE_START_HOLD_SECONDS + travel_seconds + self.marquee_end_hold_seconds;
+        let cycle = MARQUEE_START_HOLD_SECONDS + travel_seconds + self.marquee_end_hold_seconds;
         let phase = self.marquee_elapsed.rem_euclid(cycle);
         self.scroll_x = if phase < MARQUEE_START_HOLD_SECONDS {
             0.0

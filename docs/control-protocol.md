@@ -44,7 +44,7 @@ Failure:
 
 `get_settings` — returns both effective runtime settings and saved config settings.
 
-`set_settings` — accepts any subset of `appearance`, `color`, `intensity`, `search_mode` (`default` or `everything`), `ui_font` (`system`, `sans`, `serif`, `monospace`, or `rounded`), and `tailscale_profiles`. Each Tailnet profile has `id`, `label`, and `enabled`. The legacy `tailscale_enabled` boolean is still accepted as an all-profiles compatibility switch. `persist` defaults to `false`.
+`set_settings` — accepts any subset of `appearance`, `color`, `intensity`, `search_mode` (`default` or `everything`), `ui_font` (`system`, `sans`, `serif`, `monospace`, or `rounded`), and `tailscale_profiles`. Each Tailnet profile has `id`, `label`, configurable short `path`, local Tailscale `hostname`, optional `device_names` (TailDrive device ID → FastExplorer path name), and `enabled`. A blank `path` uses a stable automatic short alias derived from the profile ID. TailDrive user-facing paths use `TD/<path>/<device name>/...`; automatic device path names carry a short stable suffix derived from the device ID, while an explicit `device_names` override can make them even shorter. Internal profile/device IDs remain stable for sessions, history, transfers, and cache keys. The legacy `tailscale_enabled` boolean is still accepted as an all-profiles compatibility switch. `persist` defaults to `false`.
 
 ```json
 {"protocol":"fast-explorer/1","id":2,"method":"set_settings","params":{"color":"red","intensity":90,"search_mode":"everything","persist":false}}

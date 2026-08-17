@@ -41,8 +41,21 @@
             android:foregroundServiceType="dataSync"
             android:stopWithTask="false" />
 
+        <service
+            android:name="dev.oligami.fastexplorer.FastExplorerMessagingService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
+
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_channel_id"
+            android:value="fast_explorer_sync" />
+
         <activity
             android:name="dev.oligami.fastexplorer.FastExplorerActivity"
+            android:launchMode="singleTop"
             android:configChanges="orientation|keyboard|keyboardHidden|screenLayout|screenSize|smallestScreenSize"
             android:enableOnBackInvokedCallback="true"
             android:exported="true">
@@ -52,6 +65,10 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="dev.oligami.fastexplorer.action.OPEN_DEVICE_SYNC" />
+                <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>
     </application>

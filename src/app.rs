@@ -4,17 +4,17 @@ use std::path::{Path, PathBuf};
 #[cfg(not(target_os = "android"))]
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 #[cfg(target_os = "android")]
 use winit::platform::android::activity::AndroidApp;
-use xilem::masonry::peniko::ImageData;
+use xilem::masonry::peniko::{Color, ImageData};
 
 use crate::settings::{
     AppSettings, PathOverflowBehavior, RemoteCacheSettings, SearchMode, TailnetProfileSettings,
-    UiFont,
+    UiFont, automatic_tailnet_path, normalize_taildrive_device_name, normalize_tailnet_path,
 };
 use crate::theme::{AppearanceMode, ThemeColor, ThemePalette, ThemePatch, ThemeSettings};
 
@@ -27,6 +27,80 @@ static TAB_GROUP_COUNTER: AtomicU64 = AtomicU64::new(1);
 pub type SearchRequest = (u64, PathBuf, String, SearchMode, bool);
 pub type DirectoryRequest = (u64, PathBuf, bool);
 pub type ThumbnailRequest = PathBuf;
+
+#[derive(Debug, Default)]
+struct TabStripDragPreviewState {
+    offsets: Vec<f64>,
+    direct_slots: Vec<bool>,
+    group_candidate_slot: Option<usize>,
+    group_candidate_border: Option<Color>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct TabStripDragPreviewHandle(Arc<Mutex<TabStripDragPreviewState>>);
+
+impl Default for TabStripDragPreviewHandle {
+    fn default() -> Self {
+        Self(Arc::new(Mutex::new(TabStripDragPreviewState::default())))
+    }
+}
+
+impl PartialEq for TabStripDragPreviewHandle {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for TabStripDragPreviewHandle {}
+
+impl TabStripDragPreviewHandle {
+    pub(crate) fn set_targets(&self, offsets: Vec<f64>, direct_slots: Vec<bool>) {
+        if let Ok(mut preview) = self.0.lock() {
+            preview.offsets = offsets;
+            preview.direct_slots = direct_slots;
+        }
+    }
+
+    pub(crate) fn target_for_slot(&self, slot: usize) -> (f64, bool) {
+        let Ok(preview) = self.0.lock() else {
+            return (0.0, false);
+        };
+        (
+            preview.offsets.get(slot).copied().unwrap_or(0.0),
+            preview.direct_slots.get(slot).copied().unwrap_or(false),
+        )
+    }
+
+    pub(crate) fn set_group_candidate(&self, slot: Option<usize>, border: Option<Color>) {
+        if let Ok(mut preview) = self.0.lock() {
+            preview.group_candidate_slot = slot;
+            preview.group_candidate_border = border;
+        }
+    }
+
+    pub(crate) fn group_candidate_slot(&self) -> Option<usize> {
+        self.0
+            .lock()
+            .ok()
+            .and_then(|preview| preview.group_candidate_slot)
+    }
+
+    pub(crate) fn group_candidate_border(&self) -> Option<Color> {
+        self.0
+            .lock()
+            .ok()
+            .and_then(|preview| preview.group_candidate_border)
+    }
+
+    pub(crate) fn clear(&self) {
+        if let Ok(mut preview) = self.0.lock() {
+            preview.offsets.clear();
+            preview.direct_slots.clear();
+            preview.group_candidate_slot = None;
+            preview.group_candidate_border = None;
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum LocalFileCommand {
@@ -274,6 +348,15 @@ pub fn parse_taildrive_path(path: &Path) -> Option<TaildriveLocation> {
     })
 }
 
+fn taildrive_profile_id(location: &TaildriveLocation) -> Option<&str> {
+    match location {
+        TaildriveLocation::Root => None,
+        TaildriveLocation::Profile { profile_id }
+        | TaildriveLocation::Device { profile_id, .. }
+        | TaildriveLocation::Remote { profile_id, .. } => Some(profile_id),
+    }
+}
+
 fn taildrive_parent(location: &TaildriveLocation) -> Option<TaildriveLocation> {
     match location {
         TaildriveLocation::Root => None,
@@ -322,6 +405,7 @@ fn decode_taildrive_display_component(value: &str) -> String {
         .replace("%25", "%")
 }
 
+#[cfg(test)]
 fn parse_taildrive_display_path(value: &str) -> Option<TaildriveLocation> {
     let normalized = value.trim().replace('\\', "/");
     let components = normalized
@@ -330,7 +414,7 @@ fn parse_taildrive_display_path(value: &str) -> Option<TaildriveLocation> {
         .collect::<Vec<_>>();
     if !components
         .first()
-        .is_some_and(|c| c.eq_ignore_ascii_case("TailDrive"))
+        .is_some_and(|c| c.eq_ignore_ascii_case("TailDrive") || c.eq_ignore_ascii_case("TD"))
     {
         return None;
     }
@@ -360,18 +444,14 @@ fn parse_taildrive_display_path(value: &str) -> Option<TaildriveLocation> {
 fn taildrive_display_path(location: &TaildriveLocation) -> String {
     let component = encode_taildrive_display_component;
     match location {
-        TaildriveLocation::Root => "TailDrive".to_owned(),
+        TaildriveLocation::Root => "TD".to_owned(),
         TaildriveLocation::Profile { profile_id } => {
-            format!("TailDrive/{}", component(profile_id))
+            format!("TD/{}", component(profile_id))
         }
         TaildriveLocation::Device {
             profile_id,
             device_id,
-        } => format!(
-            "TailDrive/{}/{}",
-            component(profile_id),
-            component(device_id)
-        ),
+        } => format!("TD/{}/{}", component(profile_id), component(device_id)),
         TaildriveLocation::Remote {
             profile_id,
             device_id,
@@ -379,7 +459,7 @@ fn taildrive_display_path(location: &TaildriveLocation) -> String {
             remote_path,
         } => {
             let mut display = format!(
-                "TailDrive/{}/{}/{}",
+                "TD/{}/{}/{}",
                 component(profile_id),
                 component(device_id),
                 component(share)
@@ -434,6 +514,15 @@ pub enum AppPage {
     Settings,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SettingsEntryPoint {
+    #[default]
+    General,
+    ActionGuide,
+    #[cfg_attr(not(any(target_os = "android", test)), allow(dead_code))]
+    DeviceSync,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileCategory {
     Folder,
@@ -483,7 +572,7 @@ impl SortDirection {
 #[serde(rename_all = "snake_case")]
 pub enum TabGroupColor {
     #[default]
-    Grey,
+    #[serde(alias = "grey")]
     Blue,
     Red,
     Yellow,
@@ -495,8 +584,7 @@ pub enum TabGroupColor {
 }
 
 impl TabGroupColor {
-    pub const ALL: [Self; 9] = [
-        Self::Grey,
+    pub const ALL: [Self; 8] = [
         Self::Blue,
         Self::Red,
         Self::Yellow,
@@ -509,7 +597,6 @@ impl TabGroupColor {
 
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Grey => "Grey",
             Self::Blue => "Blue",
             Self::Red => "Red",
             Self::Yellow => "Yellow",
@@ -519,6 +606,13 @@ impl TabGroupColor {
             Self::Cyan => "Cyan",
             Self::Orange => "Orange",
         }
+    }
+
+    fn palette_index(self) -> usize {
+        Self::ALL
+            .iter()
+            .position(|color| *color == self)
+            .unwrap_or(0)
     }
 }
 
@@ -1287,6 +1381,104 @@ fn normalize_tailscale_hostname(value: &str) -> String {
     normalized
 }
 
+fn default_taildrive_device_name(device: &crate::tailscale::TaildriveDevice) -> String {
+    let candidate = if !device.hostname.trim().is_empty() {
+        device.hostname.as_str()
+    } else if !device.dns_name.trim().is_empty() {
+        device
+            .dns_name
+            .split('.')
+            .next()
+            .unwrap_or(&device.dns_name)
+    } else if !device.target.trim().is_empty() {
+        device.target.split('.').next().unwrap_or(&device.target)
+    } else {
+        device.id.as_str()
+    };
+    let compact = normalize_taildrive_device_name(candidate);
+    if compact.is_empty() {
+        normalize_taildrive_device_name(&device.id)
+    } else {
+        compact
+    }
+}
+
+fn taildrive_device_stable_name(base: &str, device_id: &str) -> String {
+    let mut hash = 0x811c9dc5_u32;
+    for byte in device_id.bytes() {
+        hash ^= u32::from(byte);
+        hash = hash.wrapping_mul(0x01000193);
+    }
+    let suffix = format!("-{:06x}", hash & 0x00ff_ffff);
+    let keep = 24usize.saturating_sub(suffix.chars().count()).max(1);
+    let mut stem = normalize_taildrive_device_name(base)
+        .chars()
+        .take(keep)
+        .collect::<String>();
+    stem = stem
+        .trim_end_matches(|ch: char| ch == '-' || ch.is_whitespace())
+        .to_owned();
+    if stem.is_empty() {
+        stem = "d".to_owned();
+    }
+    format!("{stem}{suffix}")
+}
+
+fn taildrive_device_name_with_suffix(base: &str, suffix: usize) -> String {
+    let suffix_text = format!("-{suffix}");
+    let keep = 24usize.saturating_sub(suffix_text.chars().count()).max(1);
+    let mut stem = base.chars().take(keep).collect::<String>();
+    stem = stem
+        .trim_end_matches(|ch: char| ch == '-' || ch.is_whitespace())
+        .to_owned();
+    if stem.is_empty() {
+        stem = "d".to_owned();
+    }
+    format!("{stem}{suffix_text}")
+}
+
+fn taildrive_device_path_names(profile: &TailnetProfileState) -> BTreeMap<String, String> {
+    let devices = profile
+        .status
+        .taildrive_devices
+        .iter()
+        .map(|device| (device.id.clone(), device))
+        .collect::<BTreeMap<_, _>>();
+    let mut device_ids = devices.keys().cloned().collect::<BTreeSet<_>>();
+    device_ids.extend(profile.config.device_names.keys().cloned());
+
+    let mut used_names = BTreeSet::new();
+    let mut names = BTreeMap::new();
+    for device_id in device_ids {
+        let configured = profile
+            .config
+            .device_names
+            .get(&device_id)
+            .map(|name| normalize_taildrive_device_name(name))
+            .filter(|name| !name.is_empty());
+        let mut base = if let Some(configured) = configured {
+            configured
+        } else if let Some(device) = devices.get(&device_id) {
+            taildrive_device_stable_name(&default_taildrive_device_name(device), &device_id)
+        } else {
+            taildrive_device_stable_name("d", &device_id)
+        };
+        if base.is_empty() || matches!(base.as_str(), "." | "..") {
+            base = taildrive_device_stable_name("d", &device_id);
+        }
+
+        let mut candidate = base.clone();
+        let mut suffix = 2usize;
+        while used_names.contains(&candidate.to_lowercase()) {
+            candidate = taildrive_device_name_with_suffix(&base, suffix);
+            suffix += 1;
+        }
+        used_names.insert(candidate.to_lowercase());
+        names.insert(device_id, candidate);
+    }
+    names
+}
+
 #[derive(Debug)]
 pub struct AppState {
     tabs: Vec<TabState>,
@@ -1294,8 +1486,13 @@ pub struct AppState {
     tab_groups: Vec<TabGroupState>,
     tab_context_menu_tab_id: Option<u64>,
     tab_group_editor_id: Option<u64>,
+    tab_group_scroll_anchor_id: Option<u64>,
+    tab_group_scroll_anchor_epoch: u64,
     tab_overlay_anchor_x: f64,
+    tab_strip_drag_preview: TabStripDragPreviewHandle,
+    tab_strip_drag_preview_active: bool,
     page: AppPage,
+    settings_entry_point: SettingsEntryPoint,
     persistence_enabled: bool,
     persistence_sender: Option<tokio::sync::mpsc::UnboundedSender<PersistCommand>>,
     theme_settings: ThemeSettings,
@@ -1328,6 +1525,9 @@ pub struct AppState {
     context_actions_visible: bool,
     pinned_paths: Vec<PathBuf>,
     tailscale_profiles: Vec<TailnetProfileState>,
+    tailnet_path_drafts: BTreeMap<String, String>,
+    taildrive_device_name_drafts: BTreeMap<(String, String), String>,
+    supabase: crate::supabase_sync::UiState,
     tailscale_offline_peers_expanded: BTreeSet<String>,
     tailscale_offline_devices_expanded: BTreeSet<String>,
     tailscale_sender: Option<tokio::sync::mpsc::UnboundedSender<crate::tailscale::Command>>,
@@ -1376,10 +1576,10 @@ fn mobile_primary_action_capacity_for_width(
 ) -> usize {
     // Keep this in sync with file_action_icon_button. One slot is always
     // reserved for the overflow button so it can never be pushed off-screen.
-    const MOBILE_ACTION_SLOT_WIDTH_DP: f64 = 37.0;
+    const MOBILE_ACTION_SLOT_WIDTH_DP: f64 = 48.0;
     let usable_width = (window_width_dp - inset_left - inset_right - 8.0).max(0.0);
     let total_slots = (usable_width / MOBILE_ACTION_SLOT_WIDTH_DP).floor() as usize;
-    total_slots.saturating_sub(1).min(9)
+    total_slots.saturating_sub(1).min(10)
 }
 
 impl AppState {
@@ -1408,11 +1608,25 @@ impl AppState {
         state.confirm_mobile_delete = saved.confirm_mobile_delete;
         state.delete_warning_suppressed_until_ms = saved.delete_warning_suppressed_until_ms;
         state.pinned_paths = saved.pinned_paths.clone();
+        state.supabase.settings = saved.supabase.clone();
+        if state.supabase.settings.device_id.trim().is_empty() {
+            state.supabase.settings.device_id = uuid::Uuid::new_v4().to_string();
+        }
+        if state.supabase.settings.device_name.trim().is_empty() {
+            state.supabase.settings.device_name = default_sync_device_name();
+        }
+        state.supabase.email_input = state.supabase.settings.email.clone();
+        state.supabase.status = if state.supabase.settings.is_configured() {
+            "Supabase configured; restoring sign-in…".to_owned()
+        } else {
+            "Supabase is not configured".to_owned()
+        };
         state.tailscale_profiles = saved
             .tailscale_profiles
             .into_iter()
             .map(TailnetProfileState::from_config)
             .collect();
+        state.refresh_taildrive_address_inputs();
         for tab in &mut state.tabs {
             let Some(location) = parse_taildrive_path(&tab.current_dir) else {
                 continue;
@@ -1478,8 +1692,13 @@ impl AppState {
             tab_groups: Vec::new(),
             tab_context_menu_tab_id: None,
             tab_group_editor_id: None,
+            tab_group_scroll_anchor_id: None,
+            tab_group_scroll_anchor_epoch: 0,
             tab_overlay_anchor_x: 8.0,
+            tab_strip_drag_preview: TabStripDragPreviewHandle::default(),
+            tab_strip_drag_preview_active: false,
             page: AppPage::Files,
+            settings_entry_point: SettingsEntryPoint::General,
             persistence_enabled: true,
             persistence_sender: None,
             theme_settings: ThemeSettings::default(),
@@ -1512,6 +1731,9 @@ impl AppState {
             context_actions_visible: false,
             pinned_paths: Vec::new(),
             tailscale_profiles: Vec::new(),
+            tailnet_path_drafts: BTreeMap::new(),
+            taildrive_device_name_drafts: BTreeMap::new(),
+            supabase: crate::supabase_sync::UiState::default(),
             tailscale_offline_peers_expanded: BTreeSet::new(),
             tailscale_offline_devices_expanded: BTreeSet::new(),
             tailscale_sender: None,
@@ -1597,8 +1819,13 @@ impl AppState {
             tab_groups,
             tab_context_menu_tab_id: None,
             tab_group_editor_id: None,
+            tab_group_scroll_anchor_id: None,
+            tab_group_scroll_anchor_epoch: 0,
             tab_overlay_anchor_x: 8.0,
+            tab_strip_drag_preview: TabStripDragPreviewHandle::default(),
+            tab_strip_drag_preview_active: false,
             page: AppPage::Files,
+            settings_entry_point: SettingsEntryPoint::General,
             persistence_enabled: true,
             persistence_sender: None,
             theme_settings: ThemeSettings::default(),
@@ -1631,6 +1858,9 @@ impl AppState {
             context_actions_visible: false,
             pinned_paths: Vec::new(),
             tailscale_profiles: Vec::new(),
+            tailnet_path_drafts: BTreeMap::new(),
+            taildrive_device_name_drafts: BTreeMap::new(),
+            supabase: crate::supabase_sync::UiState::default(),
             tailscale_offline_peers_expanded: BTreeSet::new(),
             tailscale_offline_devices_expanded: BTreeSet::new(),
             tailscale_sender: None,
@@ -1731,6 +1961,7 @@ impl AppState {
         );
         settings.path_overflow_behavior = self.path_overflow_behavior;
         settings.path_reset_delay_ms = self.path_reset_delay_ms;
+        settings.supabase = self.supabase.settings.clone();
         settings.pinned_paths = self.pinned_paths.clone();
         settings.confirm_mobile_delete = self.confirm_mobile_delete;
         settings.delete_warning_suppressed_until_ms = self.delete_warning_suppressed_until_ms;
@@ -1763,6 +1994,30 @@ impl AppState {
         &self.tabs
     }
 
+    pub fn tab_title(&self, index: usize) -> String {
+        let Some(tab) = self.tabs.get(index) else {
+            return String::new();
+        };
+        let Some(location) = parse_taildrive_path(&tab.current_dir) else {
+            return tab.title();
+        };
+        match location {
+            TaildriveLocation::Root => "TD".to_owned(),
+            TaildriveLocation::Profile { profile_id } => self.tailnet_path(&profile_id),
+            TaildriveLocation::Device {
+                profile_id,
+                device_id,
+            } => self.taildrive_device_name(&profile_id, &device_id),
+            TaildriveLocation::Remote {
+                share, remote_path, ..
+            } => remote_path
+                .rsplit('/')
+                .find(|part| !part.is_empty())
+                .map(str::to_owned)
+                .unwrap_or(share),
+        }
+    }
+
     pub fn tab_groups(&self) -> &[TabGroupState] {
         &self.tab_groups
     }
@@ -1779,8 +2034,34 @@ impl AppState {
         self.tab_group_editor_id
     }
 
+    pub(crate) fn tab_group_scroll_anchor(&self) -> Option<(u64, u64)> {
+        self.tab_group_scroll_anchor_id
+            .filter(|group_id| self.tab_group(*group_id).is_some())
+            .map(|group_id| (group_id, self.tab_group_scroll_anchor_epoch))
+    }
+
     pub fn tab_overlay_anchor_x(&self) -> f64 {
         self.tab_overlay_anchor_x
+    }
+
+    pub(crate) fn tab_strip_drag_preview_handle(&self) -> TabStripDragPreviewHandle {
+        self.tab_strip_drag_preview.clone()
+    }
+
+    pub(crate) fn tab_strip_drag_preview_active(&self) -> bool {
+        self.tab_strip_drag_preview_active
+    }
+
+    pub(crate) fn begin_tab_strip_drag_preview(&mut self) {
+        // The source widget writes the first prospective offsets before this
+        // action reaches AppState. Do not clear them here or the first preview
+        // frame would briefly jump back to the original layout.
+        self.tab_strip_drag_preview_active = true;
+    }
+
+    pub(crate) fn end_tab_strip_drag_preview(&mut self) {
+        self.tab_strip_drag_preview_active = false;
+        self.tab_strip_drag_preview.clear();
     }
 
     pub fn open_tab_context_menu_at(&mut self, tab_id: u64, anchor_x: f64) {
@@ -1825,6 +2106,10 @@ impl AppState {
             .find(|group| group.id == group_id)
         {
             group.collapsed = !group.collapsed;
+            // Keep the clicked group header at the same on-screen X while its
+            // member tabs expand/collapse. Explicit tab selection releases it.
+            self.tab_group_scroll_anchor_id = Some(group_id);
+            self.tab_group_scroll_anchor_epoch = self.tab_group_scroll_anchor_epoch.wrapping_add(1);
             self.close_tab_overlays();
             self.persist_session();
         }
@@ -1903,14 +2188,32 @@ impl AppState {
     }
 
     pub fn open_settings(&mut self) {
+        self.open_settings_from(SettingsEntryPoint::General);
+    }
+
+    pub fn open_action_guide(&mut self) {
+        self.open_settings_from(SettingsEntryPoint::ActionGuide);
+    }
+
+    #[cfg(any(target_os = "android", test))]
+    pub fn open_device_sync_settings(&mut self) {
+        self.open_settings_from(SettingsEntryPoint::DeviceSync);
+    }
+
+    fn open_settings_from(&mut self, entry_point: SettingsEntryPoint) {
         self.close_tab_overlays();
         self.file_more_popup_open = false;
         self.sort_popup_open = false;
+        self.settings_entry_point = entry_point;
         // Opening Settings is an explicit retry point. A previous worker response may
         // have been lost while the view/task tree was being rebuilt; never let that
         // stale request keep Usage on "Calculating…" forever.
         self.force_refresh_remote_cache_usage();
         self.page = AppPage::Settings;
+    }
+
+    pub const fn settings_entry_point(&self) -> SettingsEntryPoint {
+        self.settings_entry_point
     }
 
     pub fn close_settings(&mut self) {
@@ -1975,7 +2278,7 @@ impl AppState {
     pub fn paste_conflict_destination(&self) -> Option<String> {
         self.pending_paste_conflict
             .as_ref()
-            .map(|pending| display_path(&pending.target_location))
+            .map(|pending| self.display_path_for(&pending.target_location))
     }
 
     pub fn cancel_paste_conflict(&mut self) {
@@ -2048,6 +2351,387 @@ impl AppState {
             .unwrap_or_default()
     }
 
+    pub fn tailnet_path(&self, profile_id: &str) -> String {
+        self.tailscale_profile(profile_id)
+            .map(|profile| {
+                let configured = normalize_tailnet_path(&profile.config.path);
+                if configured.is_empty() {
+                    automatic_tailnet_path(&profile.config.id)
+                } else {
+                    configured
+                }
+            })
+            .unwrap_or_else(|| automatic_tailnet_path(profile_id))
+    }
+
+    pub fn tailnet_path_edit_value(&self, profile_id: &str) -> String {
+        self.tailnet_path_drafts
+            .get(profile_id)
+            .cloned()
+            .unwrap_or_else(|| self.tailnet_path(profile_id))
+    }
+
+    pub fn taildrive_device_name(&self, profile_id: &str, device_id: &str) -> String {
+        let Some(profile) = self.tailscale_profile(profile_id) else {
+            return taildrive_device_stable_name("d", device_id);
+        };
+        taildrive_device_path_names(profile)
+            .get(device_id)
+            .cloned()
+            .unwrap_or_else(|| taildrive_device_stable_name("d", device_id))
+    }
+
+    pub fn taildrive_device_name_edit_value(&self, profile_id: &str, device_id: &str) -> String {
+        self.taildrive_device_name_drafts
+            .get(&(profile_id.to_owned(), device_id.to_owned()))
+            .cloned()
+            .unwrap_or_else(|| self.taildrive_device_name(profile_id, device_id))
+    }
+
+    fn taildrive_display_path_for(&self, location: &TaildriveLocation) -> String {
+        let component = encode_taildrive_display_component;
+        match location {
+            TaildriveLocation::Root => "TD".to_owned(),
+            TaildriveLocation::Profile { profile_id } => {
+                format!("TD/{}", component(&self.tailnet_path(profile_id)))
+            }
+            TaildriveLocation::Device {
+                profile_id,
+                device_id,
+            } => format!(
+                "TD/{}/{}",
+                component(&self.tailnet_path(profile_id)),
+                component(&self.taildrive_device_name(profile_id, device_id))
+            ),
+            TaildriveLocation::Remote {
+                profile_id,
+                device_id,
+                share,
+                remote_path,
+            } => {
+                let mut display = format!(
+                    "TD/{}/{}/{}",
+                    component(&self.tailnet_path(profile_id)),
+                    component(&self.taildrive_device_name(profile_id, device_id)),
+                    component(share)
+                );
+                for remote_component in remote_path.split('/').filter(|part| !part.is_empty()) {
+                    display.push('/');
+                    display.push_str(&component(remote_component));
+                }
+                display
+            }
+        }
+    }
+
+    pub fn display_path_for(&self, path: &Path) -> String {
+        if let Some(location) = crate::archive::parse_virtual_path(path) {
+            return crate::archive::display_path(&location);
+        }
+        parse_taildrive_path(path)
+            .map(|location| self.taildrive_display_path_for(&location))
+            .unwrap_or_else(|| path.to_string_lossy().replace('\\', "/"))
+    }
+
+    pub fn path_label_for(&self, path: &Path) -> String {
+        if let Some(location) = parse_taildrive_path(path) {
+            return match location {
+                TaildriveLocation::Root => "TD".to_owned(),
+                TaildriveLocation::Profile { profile_id } => self.tailnet_path(&profile_id),
+                TaildriveLocation::Device {
+                    profile_id,
+                    device_id,
+                } => self.taildrive_device_name(&profile_id, &device_id),
+                TaildriveLocation::Remote {
+                    share, remote_path, ..
+                } => remote_path
+                    .rsplit('/')
+                    .find(|part| !part.is_empty())
+                    .map(str::to_owned)
+                    .unwrap_or(share),
+            };
+        }
+        if let Some(location) = crate::archive::parse_virtual_path(path) {
+            return crate::archive::title(&location);
+        }
+        path.file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| self.display_path_for(path))
+    }
+
+    fn refresh_taildrive_address_inputs(&mut self) {
+        let values = self
+            .tabs
+            .iter()
+            .map(|tab| self.display_path_for(&tab.current_dir))
+            .collect::<Vec<_>>();
+        for (tab, value) in self.tabs.iter_mut().zip(values) {
+            tab.address_input = value;
+        }
+    }
+
+    fn refresh_active_address_input(&mut self) {
+        let value = self.display_path_for(&self.active_tab().current_dir);
+        self.active_tab_mut().address_input = value;
+    }
+
+    fn refresh_taildrive_profile_labels(&mut self, profile_id: &str) {
+        let Some(profile) = self.tailscale_profile(profile_id) else {
+            return;
+        };
+        let profile_label = profile.config.label.clone();
+        let device_names = taildrive_device_path_names(profile);
+
+        for tab in &mut self.tabs {
+            let Some(current) = parse_taildrive_path(&tab.current_dir) else {
+                continue;
+            };
+            let mut changed = false;
+            match current {
+                TaildriveLocation::Root => {
+                    for entry in &mut tab.entries {
+                        if matches!(
+                            entry.remote.as_ref(),
+                            Some(TaildriveLocation::Profile { profile_id: current }) if current == profile_id
+                        ) {
+                            entry.name.clone_from(&profile_label);
+                            changed = true;
+                        }
+                    }
+                }
+                TaildriveLocation::Profile {
+                    profile_id: current,
+                } if current == profile_id => {
+                    for entry in &mut tab.entries {
+                        let Some(TaildriveLocation::Device {
+                            profile_id: current,
+                            device_id,
+                        }) = entry.remote.as_ref()
+                        else {
+                            continue;
+                        };
+                        if current != profile_id {
+                            continue;
+                        }
+                        if let Some(name) = device_names.get(device_id) {
+                            entry.name.clone_from(name);
+                            changed = true;
+                        }
+                    }
+                }
+                _ => {}
+            }
+            if changed {
+                tab.apply_sort();
+            }
+        }
+    }
+
+    fn reconcile_taildrive_profile_references(&mut self) -> bool {
+        let valid_profile_ids = self
+            .tailscale_profiles
+            .iter()
+            .map(|profile| profile.config.id.clone())
+            .collect::<BTreeSet<_>>();
+        let profile_is_missing = |path: &Path| {
+            parse_taildrive_path(path)
+                .as_ref()
+                .and_then(taildrive_profile_id)
+                .is_some_and(|profile_id| !valid_profile_ids.contains(profile_id))
+        };
+        let root = taildrive_path(&TaildriveLocation::Root);
+        let active_index = self.active_tab;
+        let mut active_reset = false;
+
+        for (index, tab) in self.tabs.iter_mut().enumerate() {
+            tab.back_stack.retain(|path| !profile_is_missing(path));
+            tab.forward_stack.retain(|path| !profile_is_missing(path));
+            if tab
+                .selected_path
+                .as_deref()
+                .is_some_and(&profile_is_missing)
+            {
+                tab.selected_path = None;
+            }
+            if profile_is_missing(&tab.current_dir) {
+                tab.set_current_dir(root.clone());
+                tab.status = "Tailnet removed; opened TD root".to_owned();
+                active_reset |= index == active_index;
+            }
+        }
+        self.pinned_paths.retain(|path| !profile_is_missing(path));
+        self.refresh_taildrive_address_inputs();
+        active_reset
+    }
+
+    fn resolve_tailnet_profile_id(&self, value: &str) -> Option<String> {
+        self.tailscale_profiles
+            .iter()
+            .find(|profile| {
+                self.tailnet_path(&profile.config.id)
+                    .eq_ignore_ascii_case(value)
+            })
+            .or_else(|| {
+                self.tailscale_profiles.iter().find(|profile| {
+                    profile.config.id.eq_ignore_ascii_case(value)
+                        || profile.config.label.eq_ignore_ascii_case(value)
+                })
+            })
+            .map(|profile| profile.config.id.clone())
+    }
+
+    fn remembered_taildrive_device_ids(&self, profile_id: &str) -> BTreeSet<String> {
+        let mut ids = BTreeSet::new();
+        let mut remember = |path: &Path| {
+            let Some(location) = parse_taildrive_path(path) else {
+                return;
+            };
+            match location {
+                TaildriveLocation::Device {
+                    profile_id: current,
+                    device_id,
+                }
+                | TaildriveLocation::Remote {
+                    profile_id: current,
+                    device_id,
+                    ..
+                } if current == profile_id => {
+                    ids.insert(device_id);
+                }
+                _ => {}
+            }
+        };
+        for tab in &self.tabs {
+            remember(&tab.current_dir);
+            for path in &tab.back_stack {
+                remember(path);
+            }
+            for path in &tab.forward_stack {
+                remember(path);
+            }
+            if let Some(path) = tab.selected_path.as_deref() {
+                remember(path);
+            }
+        }
+        for path in &self.pinned_paths {
+            remember(path);
+        }
+        ids
+    }
+
+    fn resolve_taildrive_device_id(&self, profile_id: &str, value: &str) -> Option<String> {
+        let profile = self.tailscale_profile(profile_id)?;
+        if let Some((device_id, _)) = taildrive_device_path_names(profile)
+            .iter()
+            .find(|(_, name)| name.eq_ignore_ascii_case(value))
+        {
+            return Some(device_id.clone());
+        }
+        profile
+            .status
+            .taildrive_devices
+            .iter()
+            .find(|device| {
+                device.id.eq_ignore_ascii_case(value)
+                    || device.hostname.eq_ignore_ascii_case(value)
+                    || device.dns_name.eq_ignore_ascii_case(value)
+                    || device.target.eq_ignore_ascii_case(value)
+            })
+            .map(|device| device.id.clone())
+            .or_else(|| {
+                profile
+                    .config
+                    .device_names
+                    .keys()
+                    .find(|device_id| device_id.eq_ignore_ascii_case(value))
+                    .cloned()
+            })
+            .or_else(|| {
+                self.remembered_taildrive_device_ids(profile_id)
+                    .into_iter()
+                    .find(|device_id| {
+                        self.taildrive_device_name(profile_id, device_id)
+                            .eq_ignore_ascii_case(value)
+                    })
+            })
+    }
+
+    fn parse_taildrive_address(&self, value: &str) -> Option<TaildriveLocation> {
+        let normalized = value.trim().replace('\\', "/");
+        let components = normalized
+            .split('/')
+            .filter(|component| !component.is_empty())
+            .collect::<Vec<_>>();
+        let root = *components.first()?;
+        let legacy = root.eq_ignore_ascii_case("TailDrive");
+        if !legacy && !root.eq_ignore_ascii_case("TD") {
+            return None;
+        }
+        if components.len() == 1 {
+            return Some(TaildriveLocation::Root);
+        }
+
+        let profile_component = decode_taildrive_display_component(components[1]);
+        let profile_id = if legacy {
+            self.tailscale_profiles
+                .iter()
+                .find(|profile| profile.config.id.eq_ignore_ascii_case(&profile_component))
+                .map(|profile| profile.config.id.clone())
+                .or_else(|| self.resolve_tailnet_profile_id(&profile_component))
+                .unwrap_or_else(|| profile_component.clone())
+        } else {
+            self.resolve_tailnet_profile_id(&profile_component)?
+        };
+        if components.len() == 2 {
+            return Some(TaildriveLocation::Profile { profile_id });
+        }
+
+        let device_component = decode_taildrive_display_component(components[2]);
+        let device_id = if legacy {
+            self.tailscale_profile(&profile_id)
+                .and_then(|profile| {
+                    profile
+                        .status
+                        .taildrive_devices
+                        .iter()
+                        .find(|device| device.id.eq_ignore_ascii_case(&device_component))
+                        .map(|device| device.id.clone())
+                        .or_else(|| {
+                            profile
+                                .config
+                                .device_names
+                                .keys()
+                                .find(|device_id| device_id.eq_ignore_ascii_case(&device_component))
+                                .cloned()
+                        })
+                })
+                .or_else(|| self.resolve_taildrive_device_id(&profile_id, &device_component))
+                .unwrap_or_else(|| device_component.clone())
+        } else {
+            self.resolve_taildrive_device_id(&profile_id, &device_component)?
+        };
+        if components.len() == 3 {
+            return Some(TaildriveLocation::Device {
+                profile_id,
+                device_id,
+            });
+        }
+
+        let share = decode_taildrive_display_component(components[3]);
+        let remote_path = components[4..]
+            .iter()
+            .map(|component| decode_taildrive_display_component(component))
+            .collect::<Vec<_>>()
+            .join("/");
+        Some(TaildriveLocation::Remote {
+            profile_id,
+            device_id,
+            share,
+            remote_path,
+        })
+    }
+
     pub fn set_tailnet_label(&mut self, profile_id: &str, value: String) {
         let value = value.chars().take(40).collect::<String>();
         if value.trim().is_empty() {
@@ -2055,8 +2739,199 @@ impl AppState {
         }
         if let Some(profile) = self.tailscale_profile_mut(profile_id) {
             profile.config.label = value;
-            self.persist_settings();
         }
+        self.refresh_taildrive_profile_labels(profile_id);
+        self.persist_settings();
+    }
+
+    pub fn edit_tailnet_path(&mut self, profile_id: &str, value: String) {
+        if self.tailscale_profile(profile_id).is_none() {
+            return;
+        }
+        let value = value
+            .chars()
+            .filter(|ch| !matches!(ch, '\r' | '\n'))
+            .take(64)
+            .collect::<String>();
+        self.tailnet_path_drafts
+            .insert(profile_id.to_owned(), value);
+    }
+
+    pub fn apply_tailnet_path_edit(&mut self, profile_id: &str, value: String) {
+        if !self.tailnet_path_drafts.contains_key(profile_id)
+            && value == self.tailnet_path_edit_value(profile_id)
+        {
+            return;
+        }
+        self.edit_tailnet_path(profile_id, value);
+        self.apply_tailnet_path_draft(profile_id);
+    }
+
+    pub fn apply_tailnet_path_draft(&mut self, profile_id: &str) {
+        let Some(value) = self.tailnet_path_drafts.get(profile_id).cloned() else {
+            return;
+        };
+        if self.commit_tailnet_path(profile_id, value) {
+            self.tailnet_path_drafts.remove(profile_id);
+        }
+    }
+
+    pub fn reset_tailnet_path(&mut self, profile_id: &str) {
+        self.tailnet_path_drafts.remove(profile_id);
+        let _ = self.commit_tailnet_path(profile_id, String::new());
+    }
+
+    fn commit_tailnet_path(&mut self, profile_id: &str, value: String) -> bool {
+        let mut stored_path = normalize_tailnet_path(&value);
+        let mut effective_path = if stored_path.is_empty() {
+            automatic_tailnet_path(profile_id)
+        } else {
+            stored_path.clone()
+        };
+        let conflicts = |candidate: &str| {
+            self.tailscale_profiles.iter().any(|profile| {
+                profile.config.id != profile_id
+                    && self
+                        .tailnet_path(&profile.config.id)
+                        .eq_ignore_ascii_case(candidate)
+            })
+        };
+        if conflicts(&effective_path) {
+            if !stored_path.is_empty() {
+                if let Some(profile) = self.tailscale_profile_mut(profile_id) {
+                    profile.ping_status =
+                        format!("Tailnet path '{effective_path}' is already in use");
+                }
+                return false;
+            }
+            let mut number = 1usize;
+            loop {
+                let candidate = format!("tn{number}");
+                number += 1;
+                if !conflicts(&candidate) {
+                    stored_path = candidate.clone();
+                    effective_path = candidate;
+                    break;
+                }
+            }
+        }
+        let Some(profile) = self.tailscale_profile_mut(profile_id) else {
+            return false;
+        };
+        profile.config.path = stored_path;
+        profile.ping_status = format!("Path: TD/{effective_path}");
+        self.refresh_taildrive_address_inputs();
+        self.persist_settings();
+        true
+    }
+
+    pub fn edit_taildrive_device_name(&mut self, profile_id: &str, device_id: &str, value: String) {
+        if self.tailscale_profile(profile_id).is_none() {
+            return;
+        }
+        let value = value
+            .chars()
+            .filter(|ch| !matches!(ch, '\r' | '\n'))
+            .take(64)
+            .collect::<String>();
+        self.taildrive_device_name_drafts
+            .insert((profile_id.to_owned(), device_id.to_owned()), value);
+    }
+
+    pub fn apply_taildrive_device_name_edit(
+        &mut self,
+        profile_id: &str,
+        device_id: &str,
+        value: String,
+    ) {
+        let key = (profile_id.to_owned(), device_id.to_owned());
+        if !self.taildrive_device_name_drafts.contains_key(&key)
+            && value == self.taildrive_device_name_edit_value(profile_id, device_id)
+        {
+            return;
+        }
+        self.edit_taildrive_device_name(profile_id, device_id, value);
+        self.apply_taildrive_device_name_draft(profile_id, device_id);
+    }
+
+    pub fn apply_taildrive_device_name_draft(&mut self, profile_id: &str, device_id: &str) {
+        let key = (profile_id.to_owned(), device_id.to_owned());
+        let Some(value) = self.taildrive_device_name_drafts.get(&key).cloned() else {
+            return;
+        };
+        if self.commit_taildrive_device_name(profile_id, device_id, value) {
+            self.taildrive_device_name_drafts.remove(&key);
+        }
+    }
+
+    pub fn reset_taildrive_device_name(&mut self, profile_id: &str, device_id: &str) {
+        self.taildrive_device_name_drafts
+            .remove(&(profile_id.to_owned(), device_id.to_owned()));
+        let _ = self.commit_taildrive_device_name(profile_id, device_id, String::new());
+    }
+
+    fn commit_taildrive_device_name(
+        &mut self,
+        profile_id: &str,
+        device_id: &str,
+        value: String,
+    ) -> bool {
+        let name = normalize_taildrive_device_name(&value);
+        if !value.trim().is_empty() && name.is_empty() {
+            if let Some(profile) = self.tailscale_profile_mut(profile_id) {
+                profile.ping_status = "Device path name is invalid".to_owned();
+            }
+            return false;
+        }
+        let duplicate = if name.is_empty() {
+            false
+        } else if let Some(profile) = self.tailscale_profile(profile_id) {
+            let named_duplicate = profile.config.device_names.iter().any(|(id, existing)| {
+                id != device_id
+                    && normalize_taildrive_device_name(existing).eq_ignore_ascii_case(&name)
+            });
+            let discovered_duplicate = profile.status.taildrive_devices.iter().any(|device| {
+                device.id != device_id
+                    && self
+                        .taildrive_device_name(profile_id, &device.id)
+                        .eq_ignore_ascii_case(&name)
+            });
+            let remembered_duplicate = self
+                .remembered_taildrive_device_ids(profile_id)
+                .into_iter()
+                .any(|remembered_device_id| {
+                    remembered_device_id != device_id
+                        && self
+                            .taildrive_device_name(profile_id, &remembered_device_id)
+                            .eq_ignore_ascii_case(&name)
+                });
+            named_duplicate || discovered_duplicate || remembered_duplicate
+        } else {
+            false
+        };
+        if duplicate {
+            if let Some(profile) = self.tailscale_profile_mut(profile_id) {
+                profile.ping_status = format!("Device path name '{name}' is already in use");
+            }
+            return false;
+        }
+        let Some(profile) = self.tailscale_profile_mut(profile_id) else {
+            return false;
+        };
+        if name.is_empty() {
+            profile.config.device_names.remove(device_id);
+            profile.ping_status = "Device path name reset to automatic".to_owned();
+        } else {
+            profile
+                .config
+                .device_names
+                .insert(device_id.to_owned(), name.clone());
+            profile.ping_status = format!("Device path name: {name}");
+        }
+        self.refresh_taildrive_profile_labels(profile_id);
+        self.refresh_taildrive_address_inputs();
+        self.persist_settings();
+        true
     }
 
     pub fn set_tailnet_hostname(&mut self, profile_id: &str, value: String) {
@@ -2161,6 +3036,14 @@ impl AppState {
         let short_id = ((nonce >> 32) ^ nonce) as u32;
         let id = format!("tn-{short_id:08x}");
         let mut config = TailnetProfileSettings::new(id.clone(), format!("TN{number}"));
+        let mut path_number = number;
+        while self.tailscale_profiles.iter().any(|profile| {
+            self.tailnet_path(&profile.config.id)
+                .eq_ignore_ascii_case(&format!("tn{path_number}"))
+        }) {
+            path_number += 1;
+        }
+        config.path = format!("tn{path_number}");
         config.hostname = generated_tailscale_hostname(&id);
         config.enabled = true;
         self.tailscale_profiles
@@ -2182,10 +3065,65 @@ impl AppState {
         }
         self.tailscale_profiles
             .retain(|profile| profile.config.id != profile_id);
+        self.tailnet_path_drafts.remove(profile_id);
+        self.taildrive_device_name_drafts
+            .retain(|(draft_profile_id, _), _| draft_profile_id != profile_id);
+        let active_reset = self.reconcile_taildrive_profile_references();
+        if active_reset {
+            self.load_taildrive_location(TaildriveLocation::Root);
+        }
         self.persist_settings();
+        self.persist_session();
+        self.persist_mobile_browsing_state();
     }
 
-    pub fn set_tailscale_profiles(&mut self, profiles: Vec<TailnetProfileSettings>, persist: bool) {
+    pub fn set_tailscale_profiles(
+        &mut self,
+        mut profiles: Vec<TailnetProfileSettings>,
+        persist: bool,
+    ) {
+        let mut used_paths = BTreeSet::new();
+        let mut next_default = 1usize;
+        for profile in &mut profiles {
+            let requested = normalize_tailnet_path(&profile.path);
+            let mut effective = if requested.is_empty() {
+                automatic_tailnet_path(&profile.id)
+            } else {
+                requested.clone()
+            };
+            if used_paths.contains(&effective.to_lowercase()) {
+                if requested.is_empty() {
+                    loop {
+                        let candidate = format!("tn{next_default}");
+                        next_default += 1;
+                        if !used_paths.contains(&candidate.to_lowercase()) {
+                            profile.path = candidate.clone();
+                            effective = candidate;
+                            break;
+                        }
+                    }
+                } else {
+                    let base = requested;
+                    let mut suffix = 2usize;
+                    loop {
+                        let candidate = format!("{base}-{suffix}");
+                        suffix += 1;
+                        if !used_paths.contains(&candidate.to_lowercase()) {
+                            profile.path = candidate.clone();
+                            effective = candidate;
+                            break;
+                        }
+                    }
+                }
+            } else {
+                profile.path = requested;
+            }
+            used_paths.insert(effective.to_lowercase());
+            profile.device_names.retain(|_, name| {
+                *name = normalize_taildrive_device_name(name);
+                !name.is_empty()
+            });
+        }
         let previous = self.tailscale_profile_settings();
         let sender = self.tailscale_sender.clone();
         for old in &previous {
@@ -2198,6 +3136,14 @@ impl AppState {
                 });
             }
         }
+        let valid_profile_ids = profiles
+            .iter()
+            .map(|profile| profile.id.clone())
+            .collect::<BTreeSet<_>>();
+        self.tailnet_path_drafts
+            .retain(|profile_id, _| valid_profile_ids.contains(profile_id));
+        self.taildrive_device_name_drafts
+            .retain(|(profile_id, _), _| valid_profile_ids.contains(profile_id));
         self.tailscale_profiles = profiles
             .into_iter()
             .map(|config| {
@@ -2214,6 +3160,12 @@ impl AppState {
                 }
             })
             .collect();
+        let active_reset = self.reconcile_taildrive_profile_references();
+        if active_reset {
+            self.load_taildrive_location(TaildriveLocation::Root);
+            self.persist_session();
+            self.persist_mobile_browsing_state();
+        }
         if let Some(sender) = &sender {
             for profile in &self.tailscale_profiles {
                 let was_enabled = previous
@@ -2386,6 +3338,7 @@ impl AppState {
                     self.active_tab_mut().status = "Tailnet profile not found".to_owned();
                     return;
                 };
+                let path_names = taildrive_device_path_names(&profile);
                 let mut entries = profile
                     .status
                     .taildrive_devices
@@ -2395,13 +3348,10 @@ impl AppState {
                             profile_id: profile_id.clone(),
                             device_id: device.id.clone(),
                         };
-                        let name = if !device.hostname.is_empty() {
-                            device.hostname
-                        } else if !device.dns_name.is_empty() {
-                            device.dns_name
-                        } else {
-                            device.id
-                        };
+                        let name = path_names
+                            .get(&device.id)
+                            .cloned()
+                            .unwrap_or_else(|| default_taildrive_device_name(&device));
                         FileEntry {
                             path: taildrive_path(&location),
                             name,
@@ -2645,6 +3595,8 @@ impl AppState {
                         old_devices != new_devices,
                     )
                 };
+                self.refresh_taildrive_profile_labels(&profile_id);
+                self.refresh_taildrive_address_inputs();
                 if let Some(location) = parse_taildrive_path(&self.active_tab().current_dir) {
                     let matches_profile = match &location {
                         TaildriveLocation::Root => true,
@@ -3433,6 +4385,10 @@ impl AppState {
 
     #[cfg(target_os = "android")]
     pub fn poll_android_platform_state(&mut self) {
+        if crate::android_platform::take_sync_notification_opened() {
+            self.open_device_sync_settings();
+            self.supabase.status = "Incoming device transfer opened from notification".to_owned();
+        }
         let Some(app) = self.android_app.as_ref() else {
             return;
         };
@@ -3855,6 +4811,15 @@ impl AppState {
         if self.theme_settings.appearance == AppearanceMode::System {
             self.system_dark = detect_system_dark();
         }
+        self.supabase.settings = saved.supabase;
+        if self.supabase.settings.device_id.trim().is_empty() {
+            self.supabase.settings.device_id = uuid::Uuid::new_v4().to_string();
+        }
+        if self.supabase.settings.device_name.trim().is_empty() {
+            self.supabase.settings.device_name = default_sync_device_name();
+        }
+        self.supabase.email_input = self.supabase.settings.email.clone();
+        self.configure_supabase_worker();
         if self.active_tab().search_active {
             self.run_active_search();
         }
@@ -3893,6 +4858,7 @@ impl AppState {
 
     pub fn new_tab(&mut self) {
         self.close_tab_overlays();
+        self.tab_group_scroll_anchor_id = None;
         self.tabs.push(TabState::default());
         self.active_tab = self.tabs.len() - 1;
         self.page = AppPage::Files;
@@ -3904,6 +4870,7 @@ impl AppState {
         if self.tab_group(group_id).is_none() {
             return;
         }
+        self.tab_group_scroll_anchor_id = None;
         let active_id = self.active_tab().id;
         let mut tab = TabState::default();
         let new_id = tab.id;
@@ -3936,44 +4903,77 @@ impl AppState {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn move_tab_to_index(&mut self, tab_id: u64, target: usize) {
         let Some(from) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
             return;
         };
-        let mut target = target.min(self.tabs.len().saturating_sub(1));
         let source_group = self.tabs[from].group_id;
-        if let Some(group_id) = source_group {
-            let first = self
-                .tabs
-                .iter()
-                .position(|tab| tab.group_id == Some(group_id))
-                .unwrap_or(from);
-            let last = self
-                .tabs
-                .iter()
-                .rposition(|tab| tab.group_id == Some(group_id))
-                .unwrap_or(from);
-            target = target.clamp(first, last);
-        } else if let Some(target_group) = self.tabs.get(target).and_then(|tab| tab.group_id) {
-            let first = self
-                .tabs
-                .iter()
-                .position(|tab| tab.group_id == Some(target_group))
-                .unwrap_or(target);
-            let last = self
-                .tabs
-                .iter()
-                .rposition(|tab| tab.group_id == Some(target_group))
-                .unwrap_or(target);
-            target = if from < first { last } else { first };
-        }
-        if target == from {
+        self.drop_tab_at(tab_id, target, source_group, target >= from);
+    }
+
+    /// Commit a tab drag as one atomic order + group-membership change.
+    ///
+    /// `target_group` is derived from the visual group span under the dragged
+    /// tab. `None` explicitly means the tab was dropped outside every group.
+    /// Keeping the membership change and reorder together prevents a frame in
+    /// which one group is split into two visual islands.
+    pub(crate) fn drop_tab_at(
+        &mut self,
+        tab_id: u64,
+        target: usize,
+        target_group: Option<u64>,
+        moving_right: bool,
+    ) {
+        let Some(from) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
+            return;
+        };
+        let old_group = self.tabs[from].group_id;
+        let target_group = target_group.filter(|group_id| self.tab_group(*group_id).is_some());
+        let target = target.min(self.tabs.len().saturating_sub(1));
+        if target == from && target_group == old_group {
             return;
         }
 
         let active_id = self.active_tab().id;
-        let tab = self.tabs.remove(from);
-        self.tabs.insert(target.min(self.tabs.len()), tab);
+        let mut tab = self.tabs.remove(from);
+        tab.group_id = target_group;
+        let mut insert_at = target.min(self.tabs.len());
+
+        if let Some(group_id) = target_group {
+            // A group is always one contiguous range. Clamp an incoming tab to
+            // that range (including the slot immediately after its last tab).
+            let first = self
+                .tabs
+                .iter()
+                .position(|tab| tab.group_id == Some(group_id));
+            let last = self
+                .tabs
+                .iter()
+                .rposition(|tab| tab.group_id == Some(group_id));
+            if let (Some(first), Some(last)) = (first, last) {
+                insert_at = insert_at.clamp(first, last + 1);
+            }
+        } else if let Some(group_id) = self.tabs.get(insert_at).and_then(|tab| tab.group_id) {
+            // Dropping outside groups must never split the group currently at
+            // the insertion point. Snap to the nearer directional boundary.
+            let first = self
+                .tabs
+                .iter()
+                .position(|tab| tab.group_id == Some(group_id))
+                .unwrap_or(insert_at);
+            let last = self
+                .tabs
+                .iter()
+                .rposition(|tab| tab.group_id == Some(group_id))
+                .unwrap_or(insert_at);
+            if insert_at > first {
+                insert_at = if moving_right { last + 1 } else { first };
+            }
+        }
+
+        self.tabs.insert(insert_at.min(self.tabs.len()), tab);
+        self.remove_empty_tab_group(old_group);
         if let Some(active_index) = self.tabs.iter().position(|tab| tab.id == active_id) {
             self.active_tab = active_index;
         }
@@ -3981,16 +4981,195 @@ impl AppState {
         self.persist_session();
     }
 
+    pub(crate) fn move_tab_group_near(&mut self, group_id: u64, target_tab_id: u64, after: bool) {
+        let Some(target_tab) = self.tabs.iter().find(|tab| tab.id == target_tab_id) else {
+            return;
+        };
+        if target_tab.group_id == Some(group_id) {
+            return;
+        }
+        let active_id = self.active_tab().id;
+        let mut moved = Vec::new();
+        let mut index = 0;
+        while index < self.tabs.len() {
+            if self.tabs[index].group_id == Some(group_id) {
+                moved.push(self.tabs.remove(index));
+            } else {
+                index += 1;
+            }
+        }
+        if moved.is_empty() {
+            return;
+        }
+
+        let Some(target_index) = self.tabs.iter().position(|tab| tab.id == target_tab_id) else {
+            // The target can only disappear if it belonged to the source group,
+            // which was rejected above. Keep this guard for corrupted session data.
+            self.tabs.extend(moved);
+            return;
+        };
+        let target_group = self.tabs[target_index].group_id;
+        let insert_at = if let Some(target_group) = target_group {
+            if after {
+                self.tabs
+                    .iter()
+                    .rposition(|tab| tab.group_id == Some(target_group))
+                    .map_or(target_index + 1, |last| last + 1)
+            } else {
+                self.tabs
+                    .iter()
+                    .position(|tab| tab.group_id == Some(target_group))
+                    .unwrap_or(target_index)
+            }
+        } else if after {
+            target_index + 1
+        } else {
+            target_index
+        };
+        self.tabs.splice(insert_at..insert_at, moved);
+        if let Some(active_index) = self.tabs.iter().position(|tab| tab.id == active_id) {
+            self.active_tab = active_index;
+        }
+        self.close_tab_overlays();
+        self.persist_session();
+    }
+
+    fn choose_tab_group_color(
+        &self,
+        ignored_group: Option<u64>,
+        forbidden: [bool; TabGroupColor::ALL.len()],
+    ) -> TabGroupColor {
+        let mut counts = [0_usize; TabGroupColor::ALL.len()];
+        for group in &self.tab_groups {
+            if Some(group.id) == ignored_group {
+                continue;
+            }
+            counts[group.color.palette_index()] += 1;
+        }
+
+        let start = self.tab_groups.len() % TabGroupColor::ALL.len();
+        let mut best: Option<usize> = None;
+        for offset in 0..TabGroupColor::ALL.len() {
+            let index = (start + offset) % TabGroupColor::ALL.len();
+            if forbidden[index] {
+                continue;
+            }
+            if best.is_none_or(|current| counts[index] < counts[current]) {
+                best = Some(index);
+            }
+        }
+        TabGroupColor::ALL[best.unwrap_or(0)]
+    }
+
+    fn tab_group_color_for_layout(
+        &self,
+        group_ids: &[Option<u64>],
+        new_members: &[bool],
+        ignored_group: Option<u64>,
+    ) -> TabGroupColor {
+        let Some(start) = new_members.iter().position(|member| *member) else {
+            return self.choose_tab_group_color(ignored_group, [false; TabGroupColor::ALL.len()]);
+        };
+        let end = new_members
+            .iter()
+            .rposition(|member| *member)
+            .unwrap_or(start);
+        let mut forbidden = [false; TabGroupColor::ALL.len()];
+        for neighbor in [
+            start.checked_sub(1),
+            (end + 1 < group_ids.len()).then_some(end + 1),
+        ] {
+            let Some(index) = neighbor else {
+                continue;
+            };
+            let Some(group_id) = group_ids.get(index).copied().flatten() else {
+                continue;
+            };
+            if Some(group_id) == ignored_group {
+                continue;
+            }
+            if let Some(group) = self.tab_group(group_id) {
+                forbidden[group.color.palette_index()] = true;
+            }
+        }
+        self.choose_tab_group_color(ignored_group, forbidden)
+    }
+
+    fn color_for_new_group_at_tab(&self, tab_index: usize) -> TabGroupColor {
+        let old_group = self.tabs.get(tab_index).and_then(TabState::group_id);
+        let disappearing_group = old_group.filter(|group_id| {
+            self.tabs
+                .iter()
+                .filter(|tab| tab.group_id == Some(*group_id))
+                .count()
+                == 1
+        });
+        let mut group_ids = self.tabs.iter().map(TabState::group_id).collect::<Vec<_>>();
+        let mut new_members = vec![false; group_ids.len()];
+        if let Some(old_group_id) = old_group {
+            group_ids.remove(tab_index);
+            new_members.remove(tab_index);
+            let insert_at = group_ids
+                .iter()
+                .rposition(|group| *group == Some(old_group_id))
+                .map_or(tab_index.min(group_ids.len()), |index| index + 1);
+            group_ids.insert(insert_at, None);
+            new_members.insert(insert_at, true);
+        } else if let Some(member) = new_members.get_mut(tab_index) {
+            *member = true;
+        }
+        self.tab_group_color_for_layout(&group_ids, &new_members, disappearing_group)
+    }
+
+    pub(crate) fn tab_group_color_for_drag(
+        &self,
+        source_tab_id: u64,
+        target_tab_id: u64,
+    ) -> TabGroupColor {
+        let Some(source_index) = self.tabs.iter().position(|tab| tab.id == source_tab_id) else {
+            return self.choose_tab_group_color(None, [false; TabGroupColor::ALL.len()]);
+        };
+        let Some(target_index) = self.tabs.iter().position(|tab| tab.id == target_tab_id) else {
+            return self.choose_tab_group_color(None, [false; TabGroupColor::ALL.len()]);
+        };
+        if source_index == target_index
+            || self.tabs[source_index].group_id.is_some()
+            || self.tabs[target_index].group_id.is_some()
+        {
+            return self.choose_tab_group_color(None, [false; TabGroupColor::ALL.len()]);
+        }
+
+        let source_was_before_target = source_index < target_index;
+        let mut group_ids = self.tabs.iter().map(TabState::group_id).collect::<Vec<_>>();
+        let mut new_members = vec![false; group_ids.len()];
+        group_ids.remove(source_index);
+        new_members.remove(source_index);
+        let target_after_remove = if source_was_before_target {
+            target_index - 1
+        } else {
+            target_index
+        };
+        new_members[target_after_remove] = true;
+        let insert_at = if source_was_before_target {
+            target_after_remove
+        } else {
+            target_after_remove + 1
+        };
+        group_ids.insert(insert_at, None);
+        new_members.insert(insert_at, true);
+        self.tab_group_color_for_layout(&group_ids, &new_members, None)
+    }
+
     pub fn create_tab_group_for_tab(&mut self, tab_id: u64) {
         let Some(tab_index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
             return;
         };
         let old_group = self.tabs[tab_index].group_id;
+        let color = self.color_for_new_group_at_tab(tab_index);
         let group_id = TAB_GROUP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let color = TabGroupColor::ALL[self.tab_groups.len() % TabGroupColor::ALL.len()];
         self.tab_groups.push(TabGroupState {
             id: group_id,
-            name: "Group".to_owned(),
+            name: String::new(),
             color,
             collapsed: false,
         });
@@ -4014,6 +5193,61 @@ impl AppState {
             self.tabs[tab_index].group_id = Some(group_id);
         }
         self.remove_empty_tab_group(old_group);
+        self.tab_context_menu_tab_id = None;
+        self.tab_group_editor_id = Some(group_id);
+        self.persist_session();
+    }
+
+    pub(crate) fn create_tab_group_from_drag(
+        &mut self,
+        source_tab_id: u64,
+        target_tab_id: u64,
+        anchor_x: f64,
+    ) {
+        if source_tab_id == target_tab_id {
+            return;
+        }
+        let Some(source_index) = self.tabs.iter().position(|tab| tab.id == source_tab_id) else {
+            return;
+        };
+        let Some(target_index) = self.tabs.iter().position(|tab| tab.id == target_tab_id) else {
+            return;
+        };
+        if self.tabs[source_index].group_id.is_some() || self.tabs[target_index].group_id.is_some()
+        {
+            return;
+        }
+
+        let active_id = self.active_tab().id;
+        let color = self.tab_group_color_for_drag(source_tab_id, target_tab_id);
+        let group_id = TAB_GROUP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        self.tab_groups.push(TabGroupState {
+            id: group_id,
+            name: String::new(),
+            color,
+            collapsed: false,
+        });
+
+        let source_was_before_target = source_index < target_index;
+        let mut source = self.tabs.remove(source_index);
+        source.group_id = Some(group_id);
+        let Some(target_after_remove) = self.tabs.iter().position(|tab| tab.id == target_tab_id)
+        else {
+            self.tab_groups.retain(|group| group.id != group_id);
+            return;
+        };
+        self.tabs[target_after_remove].group_id = Some(group_id);
+        let insert_at = if source_was_before_target {
+            target_after_remove
+        } else {
+            target_after_remove + 1
+        };
+        self.tabs.insert(insert_at, source);
+
+        if let Some(active_index) = self.tabs.iter().position(|tab| tab.id == active_id) {
+            self.active_tab = active_index;
+        }
+        self.tab_overlay_anchor_x = anchor_x.max(8.0);
         self.tab_context_menu_tab_id = None;
         self.tab_group_editor_id = Some(group_id);
         self.persist_session();
@@ -4140,6 +5374,7 @@ impl AppState {
     pub fn select_tab(&mut self, index: usize) {
         if index < self.tabs.len() {
             self.close_tab_overlays();
+            self.tab_group_scroll_anchor_id = None;
             self.active_tab = index;
             self.page = AppPage::Files;
             if let Some(location) =
@@ -4230,11 +5465,372 @@ impl AppState {
         self.run_active_search();
     }
 
+    pub fn set_supabase_sender(
+        &mut self,
+        sender: tokio::sync::mpsc::UnboundedSender<crate::supabase_sync::Command>,
+    ) {
+        self.supabase.sender = Some(sender);
+        self.persist_settings();
+        self.configure_supabase_worker();
+    }
+
+    fn configure_supabase_worker(&mut self) {
+        let Some(sender) = self.supabase.sender.as_ref() else {
+            return;
+        };
+        let _ = sender.send(crate::supabase_sync::Command::Configure {
+            settings: self.supabase.settings.clone(),
+            session_path: supabase_session_path(),
+        });
+    }
+
+    pub fn apply_supabase_settings(&mut self) {
+        self.persist_settings();
+        self.supabase.status = "Applying device sync settings…".to_owned();
+        self.configure_supabase_worker();
+    }
+
+    pub fn supabase_project_url(&self) -> &str {
+        &self.supabase.settings.project_url
+    }
+
+    pub fn set_supabase_project_url(&mut self, value: String) {
+        self.supabase.settings.project_url = single_line_input(value);
+        self.persist_settings();
+    }
+
+    pub fn supabase_publishable_key(&self) -> &str {
+        &self.supabase.settings.publishable_key
+    }
+
+    pub fn set_supabase_publishable_key(&mut self, value: String) {
+        self.supabase.settings.publishable_key = single_line_input(value);
+        self.persist_settings();
+    }
+
+    pub fn supabase_device_name(&self) -> &str {
+        &self.supabase.settings.device_name
+    }
+
+    pub fn set_supabase_device_name(&mut self, value: String) {
+        self.supabase.settings.device_name = single_line_input(value);
+        self.persist_settings();
+    }
+
+    pub fn supabase_email_input(&self) -> &str {
+        &self.supabase.email_input
+    }
+
+    pub fn set_supabase_email_input(&mut self, value: String) {
+        self.supabase.email_input = single_line_input(value);
+    }
+
+    pub fn supabase_otp_input(&self) -> &str {
+        &self.supabase.otp_input
+    }
+
+    pub fn set_supabase_otp_input(&mut self, value: String) {
+        self.supabase.otp_input = single_line_input(value);
+    }
+
+    pub fn supabase_status(&self) -> &str {
+        &self.supabase.status
+    }
+
+    pub fn supabase_signed_in(&self) -> bool {
+        self.supabase.signed_in
+    }
+
+    pub fn supabase_user_email(&self) -> &str {
+        &self.supabase.user_email
+    }
+
+    pub fn supabase_devices(&self) -> &[crate::supabase_sync::Device] {
+        &self.supabase.devices
+    }
+
+    pub fn supabase_inbox(&self) -> &[crate::supabase_sync::InboxItem] {
+        &self.supabase.inbox
+    }
+
+    pub fn supabase_local_device_key(&self) -> &str {
+        &self.supabase.settings.device_id
+    }
+
+    pub fn request_supabase_otp(&mut self) {
+        self.supabase.settings.email = self.supabase.email_input.trim().to_owned();
+        self.persist_settings();
+        self.configure_supabase_worker();
+        let Some(sender) = self.supabase.sender.as_ref() else {
+            self.supabase.status = "Supabase worker is not ready".to_owned();
+            return;
+        };
+        self.supabase.status = "Requesting email OTP…".to_owned();
+        let _ = sender.send(crate::supabase_sync::Command::RequestOtp {
+            email: self.supabase.email_input.clone(),
+        });
+    }
+
+    pub fn verify_supabase_otp(&mut self) {
+        self.configure_supabase_worker();
+        let Some(sender) = self.supabase.sender.as_ref() else {
+            self.supabase.status = "Supabase worker is not ready".to_owned();
+            return;
+        };
+        self.supabase.status = "Verifying OTP…".to_owned();
+        let _ = sender.send(crate::supabase_sync::Command::VerifyOtp {
+            email: self.supabase.email_input.clone(),
+            token: self.supabase.otp_input.clone(),
+        });
+    }
+
+    pub fn sign_out_supabase(&mut self) {
+        let Some(sender) = self.supabase.sender.as_ref() else {
+            return;
+        };
+        let _ = sender.send(crate::supabase_sync::Command::SignOut);
+    }
+
+    pub fn refresh_supabase_devices(&mut self) {
+        let Some(sender) = self.supabase.sender.as_ref() else {
+            return;
+        };
+        self.supabase.status = "Refreshing devices…".to_owned();
+        let _ = sender.send(crate::supabase_sync::Command::RefreshDevices);
+    }
+
+    pub fn send_clipboard_to_supabase_device(&mut self, receiver_device_id: String) {
+        let text = match self.system_clipboard_text() {
+            Ok(text) => text,
+            Err(error) => {
+                self.supabase.status = error;
+                return;
+            }
+        };
+        let Some(sender) = self.supabase.sender.as_ref() else {
+            self.supabase.status = "Supabase worker is not ready".to_owned();
+            return;
+        };
+        self.supabase.status = "Sending clipboard…".to_owned();
+        let _ = sender.send(crate::supabase_sync::Command::SendClipboard {
+            receiver_device_id,
+            text,
+        });
+    }
+
+    pub fn send_selected_file_to_supabase_device(&mut self, receiver_device_id: String) {
+        let Some(path) = self.active_tab().selected_path.clone() else {
+            self.supabase.status = "Select a file first".to_owned();
+            return;
+        };
+        if parse_taildrive_path(&path).is_some()
+            || crate::archive::parse_virtual_path(&path).is_some()
+        {
+            self.supabase.status =
+                "Device send currently requires a local file; copy the remote file locally first"
+                    .to_owned();
+            return;
+        }
+        let Some(sender) = self.supabase.sender.as_ref() else {
+            self.supabase.status = "Supabase worker is not ready".to_owned();
+            return;
+        };
+        self.supabase.status = "Sending file…".to_owned();
+        let _ = sender.send(crate::supabase_sync::Command::SendFile {
+            receiver_device_id,
+            path,
+        });
+    }
+
+    pub fn receive_supabase_file(&mut self, item: crate::supabase_sync::InboxItem) {
+        let Some(sender) = self.supabase.sender.as_ref() else {
+            return;
+        };
+        self.supabase.status = format!("Receiving {}…", item.file_name);
+        let _ = sender.send(crate::supabase_sync::Command::ReceiveFile { item });
+    }
+
+    pub fn copy_supabase_clipboard(&mut self, item: crate::supabase_sync::InboxItem) {
+        match self.set_system_clipboard_text(item.clipboard_text.clone()) {
+            Ok(()) => {
+                self.supabase.status = "Received clipboard copied to this device".to_owned();
+                if let Some(sender) = self.supabase.sender.as_ref() {
+                    let _ = sender.send(crate::supabase_sync::Command::AckTransfer {
+                        transfer_id: item.id,
+                    });
+                }
+            }
+            Err(error) => self.supabase.status = error,
+        }
+    }
+
+    pub fn apply_supabase_event(&mut self, event: crate::supabase_sync::Event) {
+        match event {
+            crate::supabase_sync::Event::AuthState {
+                signed_in,
+                email,
+                status,
+            } => {
+                self.supabase.signed_in = signed_in;
+                self.supabase.user_email = email;
+                self.supabase.status = status;
+                #[cfg(target_os = "android")]
+                if signed_in {
+                    if let Some(app) = self.android_app.as_ref() {
+                        let _ = crate::android_platform::ensure_notification_permission(app);
+                    }
+                }
+                if !signed_in {
+                    self.supabase.devices.clear();
+                    self.supabase.inbox.clear();
+                    self.supabase.push_token.clear();
+                } else {
+                    #[cfg(target_os = "android")]
+                    self.sync_supabase_push_token();
+                }
+            }
+            crate::supabase_sync::Event::OtpSent(status) => {
+                self.supabase.status = status;
+            }
+            crate::supabase_sync::Event::Devices(result) => match result {
+                Ok(devices) => {
+                    self.supabase.devices = devices;
+                    self.supabase.status = "Device list updated".to_owned();
+                }
+                Err(error) => self.supabase.status = error,
+            },
+            crate::supabase_sync::Event::Inbox(result) => match result {
+                Ok(inbox) => {
+                    let old_ids = self
+                        .supabase
+                        .inbox
+                        .iter()
+                        .map(|item| item.id.clone())
+                        .collect::<BTreeSet<_>>();
+                    let new_items = inbox
+                        .iter()
+                        .filter(|item| !old_ids.contains(&item.id))
+                        .count();
+                    self.supabase.inbox = inbox;
+                    if new_items > 0 {
+                        self.notify_incoming_supabase(new_items);
+                    }
+                    #[cfg(target_os = "android")]
+                    self.sync_supabase_push_token();
+                }
+                Err(error) => self.supabase.status = error,
+            },
+            crate::supabase_sync::Event::PushTokenUpdated { token, result } => match result {
+                Ok(()) => self.supabase.push_token = token,
+                Err(error) => self.supabase.status = error,
+            },
+            crate::supabase_sync::Event::Sent(result) => {
+                self.supabase.status = result.unwrap_or_else(|error| error);
+            }
+            crate::supabase_sync::Event::FileReceived {
+                transfer_id,
+                result,
+            } => match result {
+                Ok(path) => {
+                    self.supabase.inbox.retain(|item| item.id != transfer_id);
+                    self.supabase.status = format!("Received {}", path.display());
+                    #[cfg(target_os = "android")]
+                    if let Some(app) = self.android_app.as_ref() {
+                        let _ = crate::android_platform::notify_file_changes(app, &[path]);
+                    }
+                }
+                Err(error) => self.supabase.status = error,
+            },
+            crate::supabase_sync::Event::TransferAcked {
+                transfer_id,
+                result,
+            } => match result {
+                Ok(()) => self.supabase.inbox.retain(|item| item.id != transfer_id),
+                Err(error) => self.supabase.status = error,
+            },
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    fn sync_supabase_push_token(&mut self) {
+        if !self.supabase.signed_in {
+            return;
+        }
+        let Some(app) = self.android_app.as_ref() else {
+            return;
+        };
+        let Ok(token) = crate::android_platform::fcm_token(app) else {
+            return;
+        };
+        let token = token.trim();
+        if token.is_empty() || token == self.supabase.push_token {
+            return;
+        }
+        if let Some(sender) = self.supabase.sender.as_ref() {
+            let _ = sender.send(crate::supabase_sync::Command::UpdatePushToken {
+                token: token.to_owned(),
+            });
+        }
+    }
+
+    fn notify_incoming_supabase(&self, _count: usize) {
+        #[cfg(target_os = "android")]
+        if let Some(app) = self.android_app.as_ref() {
+            let count = _count;
+            let detail = if count == 1 {
+                "A file or clipboard item is ready to receive".to_owned()
+            } else {
+                format!("{count} items are ready to receive")
+            };
+            let _ = crate::android_platform::notify_incoming_sync(
+                app,
+                "FastExplorer device transfer".to_owned(),
+                detail,
+            );
+        }
+    }
+
+    pub fn copy_selected_path_to_system_clipboard(&mut self) {
+        let Some(path) = self.active_tab().selected_path.clone() else {
+            self.active_tab_mut().status = "Select an item to copy its path".to_owned();
+            return;
+        };
+        let text = self.display_path_for(&path);
+        self.active_tab_mut().status = match self.set_system_clipboard_text(text) {
+            Ok(()) => "Path copied to system clipboard".to_owned(),
+            Err(error) => format!("Cannot copy path: {error}"),
+        };
+    }
+
+    fn set_system_clipboard_text(&self, text: String) -> Result<(), String> {
+        #[cfg(target_os = "android")]
+        {
+            crate::system_clipboard::set_text(self.android_app.as_ref(), text)
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            crate::system_clipboard::set_text(None, text)
+        }
+    }
+
+    fn system_clipboard_text(&self) -> Result<String, String> {
+        #[cfg(target_os = "android")]
+        {
+            crate::system_clipboard::get_text(self.android_app.as_ref())
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            crate::system_clipboard::get_text(None)
+        }
+    }
+
     pub fn set_persistence_sender(
         &mut self,
         sender: tokio::sync::mpsc::UnboundedSender<PersistCommand>,
     ) {
         self.persistence_sender = Some(sender);
+        // Persist startup-generated device IDs/names once the async writer exists.
+        self.persist_settings();
     }
 
     pub fn set_remote_prepare_sender(
@@ -5123,7 +6719,7 @@ impl AppState {
 
     pub fn submit_address(&mut self, value: String) {
         let raw = value.trim().replace('\\', "/");
-        if let Some(location) = parse_taildrive_display_path(&raw) {
+        if let Some(location) = self.parse_taildrive_address(&raw) {
             self.navigate_to(taildrive_path(&location));
             return;
         }
@@ -5155,6 +6751,7 @@ impl AppState {
         let archive_location = crate::archive::parse_virtual_path(&path);
         let taildrive_location = parse_taildrive_path(&path);
         self.active_tab_mut().set_current_dir(path);
+        self.refresh_active_address_input();
         if let Some(location) = archive_location {
             self.load_archive_location(location);
         } else if let Some(location) = taildrive_location {
@@ -5324,10 +6921,12 @@ impl AppState {
         };
         if let Some(index) = self.pinned_paths.iter().position(|pinned| pinned == &path) {
             self.pinned_paths.remove(index);
-            self.active_tab_mut().status = format!("Unpinned: {}", display_path(&path));
+            let display = self.display_path_for(&path);
+            self.active_tab_mut().status = format!("Unpinned: {display}");
         } else {
             self.pinned_paths.push(path.clone());
-            self.active_tab_mut().status = format!("Pinned: {}", display_path(&path));
+            let display = self.display_path_for(&path);
+            self.active_tab_mut().status = format!("Pinned: {display}");
         }
         self.persist_settings();
     }
@@ -5421,7 +7020,7 @@ impl AppState {
         let name = entry
             .as_ref()
             .map(|entry| entry.name.clone())
-            .unwrap_or_else(|| display_path(&path));
+            .unwrap_or_else(|| self.display_path_for(&path));
         let result = self.open_remote_cache_path(&path);
         self.active_tab_mut().status = match result {
             Ok(()) if is_aab_name(&name) => format!("Preparing installer: {name}"),
@@ -5719,10 +7318,8 @@ impl AppState {
     }
 
     pub fn toggle_transfer_popup(&mut self) {
-        if !self.file_transfers.is_empty() {
-            self.close_tab_overlays();
-            self.transfer_popup_open = !self.transfer_popup_open;
-        }
+        self.close_tab_overlays();
+        self.transfer_popup_open = !self.transfer_popup_open;
     }
 
     pub fn close_transfer_popup(&mut self) {
@@ -5764,9 +7361,6 @@ impl AppState {
 
     pub fn clear_finished_transfers(&mut self) {
         self.file_transfers.retain(|transfer| !transfer.done);
-        if self.file_transfers.is_empty() {
-            self.transfer_popup_open = false;
-        }
     }
 
     pub fn oldest_transfer_for_icon(&self) -> Option<&FileTransferProgress> {
@@ -6308,7 +7902,7 @@ impl AppState {
             .iter()
             .find(|entry| entry.path == path)
             .map(|entry| entry.name.clone())
-            .unwrap_or_else(|| display_path(&path));
+            .unwrap_or_else(|| self.display_path_for(&path));
 
         #[cfg(target_os = "android")]
         if self.confirm_mobile_delete && unix_ms_now() >= self.delete_warning_suppressed_until_ms {
@@ -6413,7 +8007,7 @@ impl AppState {
             .iter()
             .find(|entry| entry.path == path)
             .map(|entry| entry.name.clone())
-            .unwrap_or_else(|| display_path(&path));
+            .unwrap_or_else(|| self.display_path_for(&path));
         let status = if cfg!(target_os = "android") {
             format!("Deleting {name}…")
         } else {
@@ -7045,7 +8639,9 @@ fn open_path_with_system(path: &Path) -> Result<(), String> {
 
 fn is_android_install_name(name: &str) -> bool {
     Path::new(name).extension().is_some_and(|extension| {
-        extension.eq_ignore_ascii_case("apk") || extension.eq_ignore_ascii_case("aab")
+        extension.eq_ignore_ascii_case("apk")
+            || extension.eq_ignore_ascii_case("apks")
+            || extension.eq_ignore_ascii_case("aab")
     })
 }
 
@@ -7722,6 +9318,13 @@ fn remove_legacy_android_session() {
     }
 }
 
+fn supabase_session_path() -> Option<PathBuf> {
+    session_path().and_then(|path| {
+        path.parent()
+            .map(|parent| parent.join("supabase-session.json"))
+    })
+}
+
 fn config_path() -> Option<PathBuf> {
     #[cfg(target_os = "windows")]
     if let Some(config_home) = std::env::var_os("APPDATA") {
@@ -7805,6 +9408,20 @@ pub(crate) fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
+fn default_sync_device_name() -> String {
+    std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| {
+            if cfg!(target_os = "android") {
+                "Android device".to_owned()
+            } else {
+                "FastExplorer device".to_owned()
+            }
+        })
+}
+
 fn single_line_input(value: String) -> String {
     let normalized = value.replace("\r\n", "\n").replace('\r', "\n");
     normalized
@@ -7864,17 +9481,165 @@ mod tests {
         TabState::from_path(path)
     }
 
+    fn app_with_full_palette_around_ungrouped(root: PathBuf, ungrouped: usize) -> AppState {
+        let mut app = app_at(root.clone());
+        app.tabs.clear();
+        app.tab_groups.clear();
+        let left_colors = [
+            TabGroupColor::Yellow,
+            TabGroupColor::Green,
+            TabGroupColor::Pink,
+            TabGroupColor::Purple,
+            TabGroupColor::Cyan,
+            TabGroupColor::Orange,
+            TabGroupColor::Blue,
+        ];
+        for (index, color) in left_colors.into_iter().enumerate() {
+            let group_id = 10_000 + index as u64;
+            let mut tab = tab_at(root.clone());
+            tab.group_id = Some(group_id);
+            app.tabs.push(tab);
+            app.tab_groups.push(TabGroupState {
+                id: group_id,
+                name: String::new(),
+                color,
+                collapsed: false,
+            });
+        }
+        for _ in 0..ungrouped {
+            app.tabs.push(tab_at(root.clone()));
+        }
+        let red_group_id = 20_000;
+        let mut red_tab = tab_at(root);
+        red_tab.group_id = Some(red_group_id);
+        app.tabs.push(red_tab);
+        app.tab_groups.push(TabGroupState {
+            id: red_group_id,
+            name: String::new(),
+            color: TabGroupColor::Red,
+            collapsed: false,
+        });
+        app.active_tab = 0;
+        app
+    }
+
+    #[test]
+    fn legacy_grey_tab_group_color_migrates_to_blue() {
+        let color: TabGroupColor = serde_json::from_str("\"grey\"").expect("legacy grey color");
+        assert_eq!(color, TabGroupColor::Blue);
+        assert_eq!(TabGroupColor::default(), TabGroupColor::Blue);
+        assert_eq!(
+            serde_json::to_string(&color).expect("serialize blue"),
+            "\"blue\""
+        );
+        assert_eq!(TabGroupColor::ALL.len(), 8);
+    }
+
+    #[test]
+    fn new_tab_groups_use_unused_colors_before_repeating() {
+        let root = sandbox();
+        let mut app = app_at(root.clone());
+        for index in 1..TabGroupColor::ALL.len() {
+            app.tabs.push(tab_at(root.join(format!("tab-{index}"))));
+        }
+
+        let tab_ids = app.tabs.iter().map(TabState::id).collect::<Vec<_>>();
+        let mut colors = Vec::new();
+        for tab_id in tab_ids {
+            app.create_tab_group_for_tab(tab_id);
+            let group_id = app
+                .tabs
+                .iter()
+                .find(|tab| tab.id == tab_id)
+                .and_then(|tab| tab.group_id)
+                .expect("new group id");
+            let color = app.tab_group(group_id).expect("new group").color();
+            assert!(!colors.contains(&color), "group color repeated too early");
+            colors.push(color);
+        }
+        assert_eq!(colors.len(), TabGroupColor::ALL.len());
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn automatic_single_tab_group_avoids_adjacent_group_colors() {
+        let root = sandbox();
+        let mut app = app_with_full_palette_around_ungrouped(root.clone(), 1);
+        let target_index = app.tabs.len() - 2;
+        let target_id = app.tabs[target_index].id();
+
+        app.create_tab_group_for_tab(target_id);
+        let group_id = app.tabs[target_index].group_id.expect("generated group");
+        let color = app
+            .tab_group(group_id)
+            .expect("generated group state")
+            .color();
+        assert_ne!(color, TabGroupColor::Blue);
+        assert_ne!(color, TabGroupColor::Red);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn drag_group_preview_and_commit_avoid_adjacent_group_colors() {
+        let root = sandbox();
+        let mut app = app_with_full_palette_around_ungrouped(root.clone(), 2);
+        let source_index = app.tabs.len() - 3;
+        let target_index = app.tabs.len() - 2;
+        let source_id = app.tabs[source_index].id();
+        let target_id = app.tabs[target_index].id();
+        let preview_color = app.tab_group_color_for_drag(source_id, target_id);
+        assert_ne!(preview_color, TabGroupColor::Blue);
+        assert_ne!(preview_color, TabGroupColor::Red);
+
+        app.create_tab_group_from_drag(source_id, target_id, 32.0);
+        let group_id = app
+            .tabs
+            .iter()
+            .find(|tab| tab.id == source_id)
+            .and_then(TabState::group_id)
+            .expect("drag-created group");
+        assert_eq!(
+            app.tab_group(group_id)
+                .expect("drag-created group state")
+                .color(),
+            preview_color
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn group_toggle_scroll_anchor_rearms_and_explicit_tab_selection_releases_it() {
+        let root = sandbox();
+        let mut app = app_at(root.clone());
+        app.tabs.push(tab_at(root.join("second")));
+        let first_id = app.tabs[0].id();
+        app.create_tab_group_for_tab(first_id);
+        let group_id = app.tabs[0].group_id().expect("group id");
+
+        app.toggle_tab_group_collapsed(group_id);
+        let first_anchor = app.tab_group_scroll_anchor().expect("first anchor");
+        assert_eq!(first_anchor.0, group_id);
+        app.toggle_tab_group_collapsed(group_id);
+        let second_anchor = app.tab_group_scroll_anchor().expect("second anchor");
+        assert_eq!(second_anchor.0, group_id);
+        assert_ne!(first_anchor.1, second_anchor.1);
+
+        app.select_tab(1);
+        assert_eq!(app.tab_group_scroll_anchor(), None);
+        fs::remove_dir_all(root).ok();
+    }
+
     #[test]
     fn mobile_action_capacity_never_forces_overflow() {
-        assert_eq!(mobile_primary_action_capacity_for_width(400.0, 0.0, 0.0), 9);
-        assert_eq!(mobile_primary_action_capacity_for_width(360.0, 0.0, 0.0), 8);
-        assert_eq!(mobile_primary_action_capacity_for_width(240.0, 0.0, 0.0), 5);
-        assert_eq!(mobile_primary_action_capacity_for_width(206.0, 0.0, 0.0), 4);
-        assert_eq!(mobile_primary_action_capacity_for_width(172.0, 0.0, 0.0), 3);
+        assert_eq!(mobile_primary_action_capacity_for_width(400.0, 0.0, 0.0), 7);
+        assert_eq!(mobile_primary_action_capacity_for_width(360.0, 0.0, 0.0), 6);
+        assert_eq!(mobile_primary_action_capacity_for_width(240.0, 0.0, 0.0), 3);
+        assert_eq!(mobile_primary_action_capacity_for_width(206.0, 0.0, 0.0), 3);
+        assert_eq!(mobile_primary_action_capacity_for_width(172.0, 0.0, 0.0), 2);
         assert_eq!(mobile_primary_action_capacity_for_width(70.0, 0.0, 0.0), 0);
         assert_eq!(
             mobile_primary_action_capacity_for_width(240.0, 20.0, 20.0),
-            4
+            3
         );
     }
 
@@ -7885,8 +9650,13 @@ mod tests {
             tab_groups: Vec::new(),
             tab_context_menu_tab_id: None,
             tab_group_editor_id: None,
+            tab_group_scroll_anchor_id: None,
+            tab_group_scroll_anchor_epoch: 0,
             tab_overlay_anchor_x: 8.0,
+            tab_strip_drag_preview: TabStripDragPreviewHandle::default(),
+            tab_strip_drag_preview_active: false,
             page: AppPage::Files,
+            settings_entry_point: SettingsEntryPoint::General,
             persistence_enabled: false,
             persistence_sender: None,
             theme_settings: ThemeSettings::default(),
@@ -7919,6 +9689,9 @@ mod tests {
             context_actions_visible: false,
             pinned_paths: Vec::new(),
             tailscale_profiles: Vec::new(),
+            tailnet_path_drafts: BTreeMap::new(),
+            taildrive_device_name_drafts: BTreeMap::new(),
+            supabase: crate::supabase_sync::UiState::default(),
             tailscale_offline_peers_expanded: BTreeSet::new(),
             tailscale_offline_devices_expanded: BTreeSet::new(),
             tailscale_sender: None,
@@ -8194,6 +9967,22 @@ mod tests {
         assert_ne!(request_id, 999);
         assert_eq!(app.remote_cache_usage_pending, Some(request_id));
         assert!(app.remote_cache_usage_label().starts_with("Calculating"));
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn settings_entry_points_keep_context_for_help_and_device_sync() {
+        let root = sandbox();
+        let mut app = app_at(root.clone());
+
+        app.open_settings();
+        assert_eq!(app.settings_entry_point(), SettingsEntryPoint::General);
+        app.open_action_guide();
+        assert_eq!(app.settings_entry_point(), SettingsEntryPoint::ActionGuide);
+        app.open_device_sync_settings();
+        assert_eq!(app.settings_entry_point(), SettingsEntryPoint::DeviceSync);
+        assert_eq!(app.page(), AppPage::Settings);
+
         fs::remove_dir_all(root).expect("cleanup");
     }
 
@@ -8760,6 +10549,30 @@ mod tests {
     }
 
     #[test]
+    fn tab_drag_preview_preserves_first_targets_until_preview_ends() {
+        let root = sandbox();
+        fs::create_dir_all(root.join("preview")).expect("preview fixture");
+        let mut app = app_at(root.join("preview"));
+        let preview = app.tab_strip_drag_preview_handle();
+
+        preview.set_targets(vec![24.0, -80.0], vec![true, false]);
+        preview.set_group_candidate(Some(1), Some(Color::BLACK));
+        app.begin_tab_strip_drag_preview();
+        assert!(app.tab_strip_drag_preview_active());
+        assert_eq!(preview.target_for_slot(0), (24.0, true));
+        assert_eq!(preview.target_for_slot(1), (-80.0, false));
+        assert_eq!(preview.group_candidate_slot(), Some(1));
+        assert_eq!(preview.group_candidate_border(), Some(Color::BLACK));
+
+        app.end_tab_strip_drag_preview();
+        assert!(!app.tab_strip_drag_preview_active());
+        assert_eq!(preview.target_for_slot(0), (0.0, false));
+        assert_eq!(preview.group_candidate_slot(), None);
+        assert_eq!(preview.group_candidate_border(), None);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn tab_group_membership_stays_contiguous_and_empty_groups_are_removed() {
         let root = sandbox();
         let first = root.join("first");
@@ -8807,6 +10620,193 @@ mod tests {
         assert!(app.tab_group(group_id).is_none());
         assert!(app.tabs().iter().all(|tab| tab.group_id().is_none()));
         fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn drag_overlap_can_create_a_two_tab_group_without_reordering_other_tabs() {
+        let root = sandbox();
+        for name in ["one", "two", "three", "four"] {
+            fs::create_dir_all(root.join(name)).expect("tab fixture");
+        }
+        let mut app = app_at(root.join("one"));
+        app.tabs.push(tab_at(root.join("two")));
+        app.tabs.push(tab_at(root.join("three")));
+        app.tabs.push(tab_at(root.join("four")));
+        let ids = app.tabs.iter().map(TabState::id).collect::<Vec<_>>();
+
+        app.create_tab_group_from_drag(ids[0], ids[2], 240.0);
+
+        let source_pos = app.tabs.iter().position(|tab| tab.id == ids[0]).unwrap();
+        let target_pos = app.tabs.iter().position(|tab| tab.id == ids[2]).unwrap();
+        let group_id = app.tabs[source_pos].group_id.expect("new drag group");
+        assert_eq!(app.tabs[target_pos].group_id, Some(group_id));
+        assert_eq!(target_pos, source_pos + 1);
+        assert_eq!(
+            app.tabs
+                .iter()
+                .find(|tab| tab.id == ids[1])
+                .unwrap()
+                .group_id,
+            None
+        );
+        assert_eq!(
+            app.tabs
+                .iter()
+                .find(|tab| tab.id == ids[3])
+                .unwrap()
+                .group_id,
+            None
+        );
+        assert_eq!(app.tab_group(group_id).unwrap().name(), "");
+        assert_eq!(app.tab_group_editor_id(), Some(group_id));
+        assert_eq!(app.tab_overlay_anchor_x(), 240.0);
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn tab_drag_can_enter_leave_and_cross_groups_without_splitting_them() {
+        let root = sandbox();
+        for name in ["one", "two", "three", "four", "five"] {
+            fs::create_dir_all(root.join(name)).expect("tab fixture");
+        }
+        let mut app = app_at(root.join("one"));
+        app.tabs.push(tab_at(root.join("two")));
+        app.tabs.push(tab_at(root.join("three")));
+        app.tabs.push(tab_at(root.join("four")));
+        app.tabs.push(tab_at(root.join("five")));
+        let ids = app.tabs.iter().map(TabState::id).collect::<Vec<_>>();
+
+        app.create_tab_group_for_tab(ids[1]);
+        let group_a = app
+            .tabs
+            .iter()
+            .find(|tab| tab.id == ids[1])
+            .unwrap()
+            .group_id
+            .unwrap();
+        app.assign_tab_to_group(ids[2], group_a);
+        app.create_tab_group_for_tab(ids[3]);
+        let group_b = app
+            .tabs
+            .iter()
+            .find(|tab| tab.id == ids[3])
+            .unwrap()
+            .group_id
+            .unwrap();
+
+        // Ungrouped -> group A.
+        app.drop_tab_at(ids[0], 1, Some(group_a), true);
+        assert!(
+            app.tabs
+                .iter()
+                .filter(|tab| tab.group_id == Some(group_a))
+                .count()
+                == 3
+        );
+
+        // Group A -> group B.
+        app.drop_tab_at(ids[2], 3, Some(group_b), true);
+        assert_eq!(
+            app.tabs
+                .iter()
+                .find(|tab| tab.id == ids[2])
+                .unwrap()
+                .group_id,
+            Some(group_b)
+        );
+
+        // Pull a member out again. Remaining members of both groups must stay contiguous.
+        let from = app.tabs.iter().position(|tab| tab.id == ids[1]).unwrap();
+        app.drop_tab_at(ids[1], from, None, false);
+        for group_id in [group_a, group_b] {
+            let positions = app
+                .tabs
+                .iter()
+                .enumerate()
+                .filter_map(|(index, tab)| (tab.group_id == Some(group_id)).then_some(index))
+                .collect::<Vec<_>>();
+            if let (Some(first), Some(last)) = (positions.first(), positions.last()) {
+                assert_eq!(positions.len(), last - first + 1);
+            }
+        }
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn moving_a_tab_group_keeps_both_groups_contiguous_and_internal_order_stable() {
+        let root = sandbox();
+        for name in ["one", "two", "three", "four", "five"] {
+            fs::create_dir_all(root.join(name)).expect("tab fixture");
+        }
+        let mut app = app_at(root.join("one"));
+        app.tabs.push(tab_at(root.join("two")));
+        app.tabs.push(tab_at(root.join("three")));
+        app.tabs.push(tab_at(root.join("four")));
+        app.tabs.push(tab_at(root.join("five")));
+        let ids = app.tabs.iter().map(TabState::id).collect::<Vec<_>>();
+
+        app.create_tab_group_for_tab(ids[1]);
+        let group_a = app
+            .tabs
+            .iter()
+            .find(|tab| tab.id == ids[1])
+            .unwrap()
+            .group_id
+            .unwrap();
+        app.assign_tab_to_group(ids[2], group_a);
+        app.create_tab_group_for_tab(ids[3]);
+        let group_b = app
+            .tabs
+            .iter()
+            .find(|tab| tab.id == ids[3])
+            .unwrap()
+            .group_id
+            .unwrap();
+        app.assign_tab_to_group(ids[4], group_b);
+
+        let group_a_before = app
+            .tabs
+            .iter()
+            .filter(|tab| tab.group_id == Some(group_a))
+            .map(TabState::id)
+            .collect::<Vec<_>>();
+        let group_b_before = app
+            .tabs
+            .iter()
+            .filter(|tab| tab.group_id == Some(group_b))
+            .map(TabState::id)
+            .collect::<Vec<_>>();
+
+        app.move_tab_group_near(group_a, ids[3], true);
+
+        let group_a_after = app
+            .tabs
+            .iter()
+            .filter(|tab| tab.group_id == Some(group_a))
+            .map(TabState::id)
+            .collect::<Vec<_>>();
+        let group_b_after = app
+            .tabs
+            .iter()
+            .filter(|tab| tab.group_id == Some(group_b))
+            .map(TabState::id)
+            .collect::<Vec<_>>();
+        assert_eq!(group_a_after, group_a_before);
+        assert_eq!(group_b_after, group_b_before);
+
+        let a_first = app
+            .tabs
+            .iter()
+            .position(|tab| tab.group_id == Some(group_a))
+            .unwrap();
+        let b_last = app
+            .tabs
+            .iter()
+            .rposition(|tab| tab.group_id == Some(group_b))
+            .unwrap();
+        assert_eq!(a_first, b_last + 1);
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]
@@ -9037,11 +11037,470 @@ mod tests {
         let display = display_path(&path);
         assert_eq!(
             display,
-            "TailDrive/work/desktop-1/My Docs/projects/日本語/report.pdf"
+            "TD/work/desktop-1/My Docs/projects/日本語/report.pdf"
         );
         assert_eq!(parse_taildrive_display_path(&display), Some(location));
         let tab = TabState::from_path(path);
         assert_eq!(tab.title(), "report.pdf");
+    }
+
+    #[test]
+    fn taildrive_short_aliases_round_trip_without_changing_internal_ids() {
+        let mut app = AppState::fresh();
+        app.persistence_enabled = false;
+        let mut config = TailnetProfileSettings::new("profile-internal-long-id", "Work");
+        config.path = "w".to_owned();
+        config
+            .device_names
+            .insert("device-internal-long-id".to_owned(), "pc".to_owned());
+        let mut profile = TailnetProfileState::from_config(config);
+        profile.status.taildrive_devices = vec![crate::tailscale::TaildriveDevice {
+            id: "device-internal-long-id".to_owned(),
+            hostname: "actual-long-device-name".to_owned(),
+            dns_name: "actual-long-device-name.example.ts.net".to_owned(),
+            os: "linux".to_owned(),
+            ips: vec!["100.64.0.1".to_owned()],
+            online: true,
+            target: "actual-long-device-name".to_owned(),
+            shares: vec!["Docs".to_owned()],
+        }];
+        app.tailscale_profiles = vec![profile];
+
+        let location = TaildriveLocation::Remote {
+            profile_id: "profile-internal-long-id".to_owned(),
+            device_id: "device-internal-long-id".to_owned(),
+            share: "Docs".to_owned(),
+            remote_path: "project/report.txt".to_owned(),
+        };
+        let internal = taildrive_path(&location);
+        assert_eq!(
+            app.display_path_for(&internal),
+            "TD/w/pc/Docs/project/report.txt"
+        );
+        assert_eq!(
+            app.parse_taildrive_address("TD/w/pc/Docs/project/report.txt"),
+            Some(location.clone())
+        );
+        assert_eq!(
+            app.parse_taildrive_address(
+                "TailDrive/profile-internal-long-id/device-internal-long-id/Docs/project/report.txt"
+            ),
+            Some(location.clone())
+        );
+
+        assert!(app.commit_tailnet_path("profile-internal-long-id", "x".to_owned()));
+        assert!(app.commit_taildrive_device_name(
+            "profile-internal-long-id",
+            "device-internal-long-id",
+            "d".to_owned(),
+        ));
+        assert_eq!(
+            app.display_path_for(&internal),
+            "TD/x/d/Docs/project/report.txt"
+        );
+        assert_eq!(parse_taildrive_path(&internal), Some(location));
+    }
+
+    #[test]
+    fn cleared_tailnet_path_uses_short_automatic_alias_and_remains_editable() {
+        let mut app = AppState::fresh();
+        app.persistence_enabled = false;
+        let mut config = TailnetProfileSettings::new("profile-with-a-long-stable-id", "Work");
+        config.path = "work".to_owned();
+        app.tailscale_profiles = vec![TailnetProfileState::from_config(config)];
+
+        assert!(app.commit_tailnet_path("profile-with-a-long-stable-id", String::new()));
+        let automatic = app.tailnet_path("profile-with-a-long-stable-id");
+        assert!(automatic.starts_with("tn-"));
+        assert!(automatic.chars().count() <= 9);
+        assert!(app.tailscale_profiles[0].config.path.is_empty());
+
+        assert!(app.commit_tailnet_path("profile-with-a-long-stable-id", "home".to_owned()));
+        assert_eq!(app.tailnet_path("profile-with-a-long-stable-id"), "home");
+    }
+
+    #[test]
+    fn tailnet_path_draft_does_not_mutate_until_apply() {
+        let mut app = AppState::fresh();
+        app.persistence_enabled = false;
+        let mut config = TailnetProfileSettings::new("work", "Work");
+        config.path = "old".to_owned();
+        app.tailscale_profiles = vec![TailnetProfileState::from_config(config)];
+
+        app.edit_tailnet_path("work", String::new());
+        assert_eq!(app.tailnet_path_edit_value("work"), "");
+        assert_eq!(app.tailnet_path("work"), "old");
+        assert_eq!(app.tailscale_profile_settings()[0].path, "old");
+
+        app.edit_tailnet_path("work", "new path".to_owned());
+        assert_eq!(app.tailnet_path_edit_value("work"), "new path");
+        assert_eq!(app.tailnet_path("work"), "old");
+        app.apply_tailnet_path_draft("work");
+        assert_eq!(app.tailnet_path("work"), "new-path");
+        assert_eq!(app.tailnet_path_edit_value("work"), "new-path");
+
+        app.reset_tailnet_path("work");
+        assert!(app.tailscale_profile_settings()[0].path.is_empty());
+        assert!(app.tailnet_path("work").starts_with("tn-"));
+    }
+
+    #[test]
+    fn taildrive_device_name_draft_is_atomic_and_updates_visible_paths_only_on_apply() {
+        let mut app = AppState::fresh();
+        app.persistence_enabled = false;
+        let mut config = TailnetProfileSettings::new("work", "Work");
+        config.path = "w".to_owned();
+        config
+            .device_names
+            .insert("device-1".to_owned(), "old".to_owned());
+        let mut profile = TailnetProfileState::from_config(config);
+        profile.status.taildrive_devices = vec![crate::tailscale::TaildriveDevice {
+            id: "device-1".to_owned(),
+            hostname: "desktop-long-name".to_owned(),
+            dns_name: "desktop-long-name.example.ts.net".to_owned(),
+            os: "linux".to_owned(),
+            ips: vec![],
+            online: true,
+            target: "desktop-long-name".to_owned(),
+            shares: vec!["Docs".to_owned()],
+        }];
+        app.tailscale_profiles = vec![profile];
+        let location = TaildriveLocation::Remote {
+            profile_id: "work".to_owned(),
+            device_id: "device-1".to_owned(),
+            share: "Docs".to_owned(),
+            remote_path: "folder/report.txt".to_owned(),
+        };
+        let internal = taildrive_path(&location);
+        app.active_tab_mut().set_current_dir(internal.clone());
+        app.refresh_taildrive_address_inputs();
+
+        app.edit_taildrive_device_name("work", "device-1", String::new());
+        assert_eq!(app.taildrive_device_name_edit_value("work", "device-1"), "");
+        assert_eq!(app.taildrive_device_name("work", "device-1"), "old");
+        assert_eq!(
+            app.active_tab().address_input,
+            "TD/w/old/Docs/folder/report.txt"
+        );
+        assert_eq!(app.active_tab().current_dir, internal);
+
+        app.edit_taildrive_device_name("work", "device-1", "desk / one".to_owned());
+        assert_eq!(
+            app.taildrive_device_name_edit_value("work", "device-1"),
+            "desk / one"
+        );
+        assert_eq!(app.taildrive_device_name("work", "device-1"), "old");
+        app.apply_taildrive_device_name_draft("work", "device-1");
+
+        assert_eq!(app.taildrive_device_name("work", "device-1"), "desk - one");
+        assert_eq!(
+            app.active_tab().address_input,
+            "TD/w/desk - one/Docs/folder/report.txt"
+        );
+        assert_eq!(
+            parse_taildrive_path(&app.active_tab().current_dir),
+            Some(location)
+        );
+    }
+
+    #[test]
+    fn rejected_device_name_keeps_draft_and_committed_alias() {
+        let mut app = AppState::fresh();
+        app.persistence_enabled = false;
+        let mut config = TailnetProfileSettings::new("work", "Work");
+        config
+            .device_names
+            .insert("device-a".to_owned(), "alpha".to_owned());
+        config
+            .device_names
+            .insert("device-b".to_owned(), "beta".to_owned());
+        app.tailscale_profiles = vec![TailnetProfileState::from_config(config)];
+
+        app.edit_taildrive_device_name("work", "device-b", "alpha".to_owned());
+        app.apply_taildrive_device_name_draft("work", "device-b");
+        assert_eq!(app.taildrive_device_name("work", "device-b"), "beta");
+        assert_eq!(
+            app.taildrive_device_name_edit_value("work", "device-b"),
+            "alpha"
+        );
+        assert!(
+            app.tailscale_profiles[0]
+                .ping_status
+                .contains("already in use")
+        );
+
+        app.edit_taildrive_device_name("work", "device-b", "..".to_owned());
+        app.apply_taildrive_device_name_draft("work", "device-b");
+        assert_eq!(app.taildrive_device_name("work", "device-b"), "beta");
+        assert_eq!(
+            app.taildrive_device_name_edit_value("work", "device-b"),
+            ".."
+        );
+        assert!(app.tailscale_profiles[0].ping_status.contains("invalid"));
+    }
+
+    #[test]
+    fn applying_an_untouched_automatic_alias_does_not_turn_it_into_an_override() {
+        let mut app = AppState::fresh();
+        app.persistence_enabled = false;
+        let mut profile =
+            TailnetProfileState::from_config(TailnetProfileSettings::new("work", "Work"));
+        profile.status.taildrive_devices = vec![crate::tailscale::TaildriveDevice {
+            id: "device-a".to_owned(),
+            hostname: "desktop-a".to_owned(),
+            dns_name: String::new(),
+            os: "linux".to_owned(),
+            ips: vec![],
+            online: true,
+            target: "desktop-a".to_owned(),
+            shares: vec![],
+        }];
+        app.tailscale_profiles = vec![profile];
+
+        let automatic_tailnet = app.tailnet_path_edit_value("work");
+        let automatic_device = app.taildrive_device_name_edit_value("work", "device-a");
+        app.apply_tailnet_path_draft("work");
+        app.apply_taildrive_device_name_draft("work", "device-a");
+        app.apply_tailnet_path_edit("work", automatic_tailnet);
+        app.apply_taildrive_device_name_edit("work", "device-a", automatic_device);
+
+        let config = &app.tailscale_profile_settings()[0];
+        assert!(config.path.is_empty());
+        assert!(!config.device_names.contains_key("device-a"));
+    }
+
+    #[test]
+    fn device_alias_cannot_steal_a_name_used_by_remembered_offline_device() {
+        let mut app = AppState::fresh();
+        app.persistence_enabled = false;
+        let mut config = TailnetProfileSettings::new("work", "Work");
+        config.path = "w".to_owned();
+        let mut profile = TailnetProfileState::from_config(config);
+        profile.status.taildrive_devices = vec![crate::tailscale::TaildriveDevice {
+            id: "device-a".to_owned(),
+            hostname: "desktop-a".to_owned(),
+            dns_name: String::new(),
+            os: "linux".to_owned(),
+            ips: vec![],
+            online: true,
+            target: "desktop-a".to_owned(),
+            shares: vec![],
+        }];
+        app.tailscale_profiles = vec![profile];
+
+        let remembered_id = "device-b-offline";
+        let remembered_alias = app.taildrive_device_name("work", remembered_id);
+        app.active_tab_mut()
+            .back_stack
+            .push(taildrive_path(&TaildriveLocation::Device {
+                profile_id: "work".to_owned(),
+                device_id: remembered_id.to_owned(),
+            }));
+
+        app.edit_taildrive_device_name("work", "device-a", remembered_alias.clone());
+        app.apply_taildrive_device_name_draft("work", "device-a");
+
+        assert_ne!(
+            app.taildrive_device_name("work", "device-a"),
+            remembered_alias
+        );
+        assert_eq!(
+            app.taildrive_device_name_edit_value("work", "device-a"),
+            remembered_alias
+        );
+        assert!(
+            app.tailscale_profiles[0]
+                .ping_status
+                .contains("already in use")
+        );
+    }
+
+    #[test]
+    fn profile_refresh_preserves_drafts_for_profiles_that_still_exist() {
+        let mut app = AppState::fresh();
+        app.persistence_enabled = false;
+        let mut config = TailnetProfileSettings::new("work", "Work");
+        config.path = "w".to_owned();
+        config
+            .device_names
+            .insert("device-a".to_owned(), "old".to_owned());
+        app.tailscale_profiles = vec![TailnetProfileState::from_config(config)];
+        app.edit_tailnet_path("work", "draft-tailnet".to_owned());
+        app.edit_taildrive_device_name("work", "device-a", "draft-device".to_owned());
+
+        let mut refreshed = app.tailscale_profile_settings();
+        refreshed[0].enabled = !refreshed[0].enabled;
+        app.set_tailscale_profiles(refreshed, false);
+
+        assert_eq!(app.tailnet_path_edit_value("work"), "draft-tailnet");
+        assert_eq!(
+            app.taildrive_device_name_edit_value("work", "device-a"),
+            "draft-device"
+        );
+    }
+
+    #[test]
+    fn taildrive_device_names_stay_short_unique_and_parseable_after_truncation() {
+        let mut app = AppState::fresh();
+        app.persistence_enabled = false;
+        let mut config = TailnetProfileSettings::new("work", "Work");
+        config.path = "w".to_owned();
+        let mut profile = TailnetProfileState::from_config(config);
+        let long_name = "this-device-name-is-definitely-too-long";
+        let device_a = crate::tailscale::TaildriveDevice {
+            id: "device-a".to_owned(),
+            hostname: long_name.to_owned(),
+            dns_name: String::new(),
+            os: "linux".to_owned(),
+            ips: vec![],
+            online: true,
+            target: long_name.to_owned(),
+            shares: vec!["Docs".to_owned()],
+        };
+        let device_b = crate::tailscale::TaildriveDevice {
+            id: "device-b".to_owned(),
+            hostname: long_name.to_owned(),
+            dns_name: String::new(),
+            os: "linux".to_owned(),
+            ips: vec![],
+            online: true,
+            target: long_name.to_owned(),
+            shares: vec!["Docs".to_owned()],
+        };
+        profile.status.taildrive_devices = vec![device_b];
+        app.tailscale_profiles = vec![profile];
+
+        let second_before = app.taildrive_device_name("work", "device-b");
+        app.tailscale_profiles[0]
+            .status
+            .taildrive_devices
+            .push(device_a);
+        let first = app.taildrive_device_name("work", "device-a");
+        let second = app.taildrive_device_name("work", "device-b");
+        assert!(first.chars().count() <= 24);
+        assert!(second.chars().count() <= 24);
+        assert_ne!(first.to_lowercase(), second.to_lowercase());
+        assert_eq!(second, second_before);
+        assert_eq!(
+            app.parse_taildrive_address(&format!("TD/w/{first}")),
+            Some(TaildriveLocation::Device {
+                profile_id: "work".to_owned(),
+                device_id: "device-a".to_owned(),
+            })
+        );
+        assert_eq!(
+            app.parse_taildrive_address(&format!("TD/w/{second}")),
+            Some(TaildriveLocation::Device {
+                profile_id: "work".to_owned(),
+                device_id: "device-b".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn remembered_taildrive_device_short_name_parses_before_status_arrives() {
+        let mut app = AppState::fresh();
+        app.persistence_enabled = false;
+        let mut config = TailnetProfileSettings::new("work", "Work");
+        config.path = "w".to_owned();
+        app.tailscale_profiles = vec![TailnetProfileState::from_config(config)];
+        let location = TaildriveLocation::Device {
+            profile_id: "work".to_owned(),
+            device_id: "very-long-internal-device-id".to_owned(),
+        };
+        app.active_tab_mut().current_dir = taildrive_path(&location);
+        let short_name = app.taildrive_device_name("work", "very-long-internal-device-id");
+        assert!(short_name.starts_with("d-"));
+        assert!(short_name.chars().count() <= 24);
+        assert_eq!(
+            app.parse_taildrive_address(&format!("TD/w/{short_name}")),
+            Some(location)
+        );
+    }
+
+    #[test]
+    fn removing_tailnet_prunes_stale_taildrive_tabs_history_and_pins() {
+        let mut app = AppState::fresh();
+        app.persistence_enabled = false;
+        let mut config = TailnetProfileSettings::new("work", "Work");
+        config.path = "w".to_owned();
+        app.tailscale_profiles = vec![TailnetProfileState::from_config(config)];
+
+        let remote = taildrive_path(&TaildriveLocation::Remote {
+            profile_id: "work".to_owned(),
+            device_id: "pc".to_owned(),
+            share: "Docs".to_owned(),
+            remote_path: "report.txt".to_owned(),
+        });
+        app.active_tab_mut().set_current_dir(remote.clone());
+        app.active_tab_mut().back_stack.push(remote.clone());
+        app.active_tab_mut().forward_stack.push(remote.clone());
+        app.pinned_paths.push(remote);
+
+        app.remove_tailnet_profile("work");
+
+        assert_eq!(
+            parse_taildrive_path(&app.active_tab().current_dir),
+            Some(TaildriveLocation::Root)
+        );
+        assert!(app.active_tab().back_stack.is_empty());
+        assert!(app.active_tab().forward_stack.is_empty());
+        assert!(app.pinned_paths().is_empty());
+        assert_eq!(app.active_tab().address_input, "TD");
+    }
+
+    #[test]
+    fn legacy_taildrive_ids_win_over_conflicting_short_aliases() {
+        let mut app = AppState::fresh();
+        app.persistence_enabled = false;
+
+        let mut first = TailnetProfileSettings::new("profile-a", "A");
+        first.path = "profile-b".to_owned();
+        first
+            .device_names
+            .insert("device-a".to_owned(), "device-b".to_owned());
+        let mut first = TailnetProfileState::from_config(first);
+        first.status.taildrive_devices = vec![
+            crate::tailscale::TaildriveDevice {
+                id: "device-a".to_owned(),
+                hostname: "alpha".to_owned(),
+                dns_name: "alpha.example.ts.net".to_owned(),
+                os: "linux".to_owned(),
+                ips: vec![],
+                online: true,
+                target: "alpha".to_owned(),
+                shares: vec!["Docs".to_owned()],
+            },
+            crate::tailscale::TaildriveDevice {
+                id: "device-b".to_owned(),
+                hostname: "beta".to_owned(),
+                dns_name: "beta.example.ts.net".to_owned(),
+                os: "linux".to_owned(),
+                ips: vec![],
+                online: true,
+                target: "beta".to_owned(),
+                shares: vec!["Docs".to_owned()],
+            },
+        ];
+        let mut second = TailnetProfileSettings::new("profile-b", "B");
+        second.path = "b".to_owned();
+        let second = TailnetProfileState::from_config(second);
+        app.tailscale_profiles = vec![first, second];
+
+        assert_eq!(
+            app.parse_taildrive_address("TD/profile-b/device-b"),
+            Some(TaildriveLocation::Device {
+                profile_id: "profile-a".to_owned(),
+                device_id: "device-a".to_owned(),
+            })
+        );
+        assert_eq!(
+            app.parse_taildrive_address("TailDrive/profile-b/device-b"),
+            Some(TaildriveLocation::Device {
+                profile_id: "profile-b".to_owned(),
+                device_id: "device-b".to_owned(),
+            })
+        );
     }
 
     #[test]
@@ -9385,6 +11844,7 @@ mod tests {
     #[test]
     fn aab_is_treated_as_android_install_package() {
         assert!(is_android_install_name("sample.apk"));
+        assert!(is_android_install_name("sample.APKS"));
         assert!(is_android_install_name("sample.AAB"));
         assert!(is_aab_name("sample.aab"));
         assert!(!is_android_install_name("sample.pdf"));
@@ -9424,6 +11884,18 @@ mod tests {
 
         app.clear_finished_transfers();
         assert!(app.file_transfers().is_empty());
+        assert!(app.transfer_popup_open());
+    }
+
+    #[test]
+    fn transfer_popup_can_open_with_empty_history() {
+        let (mut app, _receiver) = taildrive_app("target");
+        assert!(app.file_transfers().is_empty());
+
+        app.toggle_transfer_popup();
+        assert!(app.transfer_popup_open());
+
+        app.toggle_transfer_popup();
         assert!(!app.transfer_popup_open());
     }
 

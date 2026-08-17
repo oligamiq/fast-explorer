@@ -334,11 +334,15 @@ impl Widget for FileShortcutWidget {
     ) {
         if self.scope == ShortcutScope::FileList
             && let PointerEvent::Down(button) = event
-            && matches!(
-                button.button,
-                Some(PointerButton::Primary | PointerButton::Secondary)
-            )
+            && (button.button.is_none()
+                || matches!(
+                    button.button,
+                    Some(PointerButton::Primary | PointerButton::Secondary)
+                ))
         {
+            // Touch PointerDown commonly has no logical mouse button. Treat it like
+            // a normal list interaction so keyboard/type-ahead focus is restored
+            // consistently after tapping the file list on touch-first devices.
             ctx.request_focus();
         }
     }

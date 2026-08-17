@@ -141,6 +141,13 @@ pub fn root_view(
             crate::ipc::control_task(ipc_socket),
             crate::tailscale::network_task(),
             xilem::view::worker(
+                |proxy, rx| async move {
+                    crate::supabase_sync::run_worker(proxy, rx).await;
+                },
+                |state: &mut AppState, sender| state.set_supabase_sender(sender),
+                |state: &mut AppState, event| state.apply_supabase_event(event),
+            ),
+            xilem::view::worker(
                 |proxy, mut rx: xilem::tokio::sync::mpsc::UnboundedReceiver<()>| async move {
                     if rx.recv().await.is_some() {
                         let _ = xilem::tokio::task::spawn_blocking(
@@ -379,6 +386,13 @@ pub fn root_view(
                 |state: &mut AppState, ()| state.poll_android_platform_state(),
             ),
             crate::tailscale::network_task(),
+            xilem::view::worker(
+                |proxy, rx| async move {
+                    crate::supabase_sync::run_worker(proxy, rx).await;
+                },
+                |state: &mut AppState, sender| state.set_supabase_sender(sender),
+                |state: &mut AppState, event| state.apply_supabase_event(event),
+            ),
             worker(
                 |proxy, mut rx: xilem::tokio::sync::mpsc::UnboundedReceiver<()>| async move {
                     if rx.recv().await.is_some() {
