@@ -14,8 +14,8 @@ android {
         applicationId 'dev.oligami.fastexplorer'
         minSdk 30
         targetSdk 35
-        versionCode 20000003
-        versionName '0.1.3'
+        versionCode 20000004
+        versionName '0.1.4'
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
     }
 
