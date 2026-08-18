@@ -101,8 +101,8 @@ fn tab_group_header(
     let collapse_surface = sized_box(content)
         .expand()
         .padding(Padding::from_vh(5.0, 8.0))
-        .background_color(palette.tab_inactive)
-        .border(color, 1.0)
+        .background_color(Color::TRANSPARENT)
+        .border(Color::TRANSPARENT, 0.0)
         .corner_radius(Layout::RADIUS);
     sized_box(group_drag_button(collapse_surface, drag_config))
         .width(width.px())
@@ -110,16 +110,14 @@ fn tab_group_header(
         .padding(Padding::horizontal(2.0))
 }
 
-fn tab_strip_views(
-    state: &AppState,
-    min_tab_width: f64,
-    palette: ThemePalette,
-) -> (
-    Vec<Box<AnyWidgetView<AppState>>>,
-    f64,
-    Option<Rect>,
-    Option<(f64, u64)>,
-) {
+struct TabStripLayout {
+    views: Vec<Box<AnyWidgetView<AppState>>>,
+    total_width: f64,
+    reveal_target: Option<Rect>,
+    horizontal_anchor: Option<(f64, u64)>,
+}
+
+fn tab_strip_views(state: &AppState, min_tab_width: f64, palette: ThemePalette) -> TabStripLayout {
     #[derive(Clone, Copy)]
     enum Slot {
         Group(u64, f64),
@@ -416,15 +414,23 @@ fn tab_strip_views(
         }
     }
 
-    let horizontal_anchor = horizontal_anchor_x.zip(scroll_anchor_epoch);
-    (views, total_width, reveal_target, horizontal_anchor)
+    TabStripLayout {
+        views,
+        total_width,
+        reveal_target,
+        horizontal_anchor: horizontal_anchor_x.zip(scroll_anchor_epoch),
+    }
 }
 
 #[cfg(not(target_os = "android"))]
 pub fn tab_bar(state: &AppState) -> impl WidgetView<AppState> + use<> {
     let palette = state.palette();
-    let (tabs, total_width, reveal_target, horizontal_anchor) =
-        tab_strip_views(state, 78.0, palette);
+    let TabStripLayout {
+        views: tabs,
+        total_width,
+        reveal_target,
+        horizontal_anchor,
+    } = tab_strip_views(state, 78.0, palette);
     let strip = flex_row(tabs)
         .gap(0.px())
         .cross_axis_alignment(CrossAxisAlignment::Center);
@@ -471,7 +477,12 @@ pub fn tab_bar(state: &AppState) -> impl WidgetView<AppState> + use<> {
 #[cfg(target_os = "android")]
 pub fn tab_bar(state: &AppState) -> impl WidgetView<AppState> + use<> {
     let palette = state.palette();
-    let (tabs, _, reveal_target, horizontal_anchor) = tab_strip_views(state, 88.0, palette);
+    let TabStripLayout {
+        views: tabs,
+        total_width: _,
+        reveal_target,
+        horizontal_anchor,
+    } = tab_strip_views(state, 88.0, palette);
     let strip = flex_row(tabs)
         .gap(0.px())
         .cross_axis_alignment(CrossAxisAlignment::Center);
@@ -3360,11 +3371,8 @@ fn tab_item(spec: TabItemSpec, palette: ThemePalette) -> impl WidgetView<AppStat
         scroll_leading,
         group_color,
     } = spec;
-    let background = if active {
-        palette.tab_active
-    } else {
-        palette.tab_inactive
-    };
+    let inactive_background = palette.tab_inactive;
+    let active_background = palette.tab_active;
     let accessibility_label = title.clone();
     let content = sized_box(
         flex_row((sized_box(
@@ -3379,19 +3387,16 @@ fn tab_item(spec: TabItemSpec, palette: ThemePalette) -> impl WidgetView<AppStat
     .expand_width()
     .padding(Padding::from_vh(5.0, 5.0));
     let close = tab_close_button(index, true, palette);
-    let border_color = group_color.unwrap_or(if active {
-        palette.border_strong
-    } else {
-        palette.border
-    });
+    let inactive_border = group_color.unwrap_or(palette.border);
+    let active_border = group_color.unwrap_or(palette.border_strong);
     let surface = sized_box(
         flex_row((sized_box(content).flex(1.0), close))
             .gap(0.px())
             .cross_axis_alignment(CrossAxisAlignment::Center),
     )
     .expand()
-    .background_color(background)
-    .border(border_color, 1.0)
+    .background_color(Color::TRANSPARENT)
+    .border(Color::TRANSPARENT, 0.0)
     .corner_radius(Layout::RADIUS);
     let drag = tab_drag_button(
         surface,
@@ -3416,8 +3421,10 @@ fn tab_item(spec: TabItemSpec, palette: ThemePalette) -> impl WidgetView<AppStat
             drag_handle_right_inset: Layout::TAB_CLOSE_WIDTH,
             accessibility_label,
             selected: active,
-            background,
-            border: border_color,
+            inactive_background,
+            active_background,
+            inactive_border,
+            active_border,
             ungrouped_border: palette.border_strong,
             new_group_borders,
             armed_border: palette.accent,

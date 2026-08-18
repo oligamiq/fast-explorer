@@ -690,62 +690,107 @@ impl Engine {
     }
 }
 
+enum WorkerRequest {
+    Command(Command),
+    PollInbox,
+}
+
+struct WorkerResult {
+    events: Vec<Event>,
+    poll_completed: bool,
+}
+
+fn run_blocking_engine(
+    requests: std::sync::mpsc::Receiver<WorkerRequest>,
+    results: xilem::tokio::sync::mpsc::UnboundedSender<WorkerResult>,
+) {
+    // reqwest::blocking owns an internal Tokio runtime. Keep the Client's complete
+    // lifecycle on this blocking thread so it is never created or dropped from an
+    // async Tokio worker context.
+    let mut engine = Engine::default();
+    while let Ok(request) = requests.recv() {
+        let (events, poll_completed) = match request {
+            WorkerRequest::Command(command) => (handle_command(&mut engine, command), false),
+            WorkerRequest::PollInbox => {
+                let events = if engine.session.is_some() && engine.settings.is_configured() {
+                    vec![Event::Inbox(engine.poll_inbox())]
+                } else {
+                    Vec::new()
+                };
+                (events, true)
+            }
+        };
+        if results
+            .send(WorkerResult {
+                events,
+                poll_completed,
+            })
+            .is_err()
+        {
+            break;
+        }
+    }
+}
+
 pub async fn run_worker(
     proxy: xilem::core::MessageProxy<Event>,
     mut rx: xilem::tokio::sync::mpsc::UnboundedReceiver<Command>,
 ) {
-    let mut engine = Engine::default();
+    let (request_tx, request_rx) = std::sync::mpsc::channel();
+    let (result_tx, mut result_rx) = xilem::tokio::sync::mpsc::unbounded_channel();
+    let blocking_worker = match std::thread::Builder::new()
+        .name("FastExplorer Supabase".to_owned())
+        .spawn(move || run_blocking_engine(request_rx, result_tx))
+    {
+        Ok(worker) => worker,
+        Err(error) => {
+            let _ = proxy.message(Event::AuthState {
+                signed_in: false,
+                email: String::new(),
+                status: format!("Cannot start Supabase worker: {error}"),
+            });
+            return;
+        }
+    };
+
     let mut interval = xilem::tokio::time::interval(Duration::from_secs(POLL_SECONDS));
     interval.set_missed_tick_behavior(xilem::tokio::time::MissedTickBehavior::Skip);
+    let mut poll_pending = false;
+
     loop {
         xilem::tokio::select! {
             command = rx.recv() => {
                 let Some(command) = command else { break; };
-                let (next, events) = run_blocking(engine, move |engine| handle_command(engine, command)).await;
-                engine = next;
-                for event in events {
-                    if proxy.message(event).is_err() {
-                        return;
-                    }
+                if request_tx.send(WorkerRequest::Command(command)).is_err() {
+                    break;
                 }
             }
-            _ = interval.tick() => {
-                if engine.session.is_none() || !engine.settings.is_configured() {
-                    continue;
+            _ = interval.tick(), if !poll_pending => {
+                if request_tx.send(WorkerRequest::PollInbox).is_err() {
+                    break;
                 }
-                let (next, result) = run_blocking(engine, |engine| vec![Event::Inbox(engine.poll_inbox())]).await;
-                engine = next;
-                for event in result {
+                poll_pending = true;
+            }
+            result = result_rx.recv() => {
+                let Some(result) = result else { break; };
+                if result.poll_completed {
+                    poll_pending = false;
+                }
+                for event in result.events {
                     if proxy.message(event).is_err() {
+                        drop(request_tx);
                         return;
                     }
                 }
             }
         }
     }
-}
 
-async fn run_blocking<F>(engine: Engine, operation: F) -> (Engine, Vec<Event>)
-where
-    F: FnOnce(&mut Engine) -> Vec<Event> + Send + 'static,
-{
-    xilem::tokio::task::spawn_blocking(move || {
-        let mut engine = engine;
-        let events = operation(&mut engine);
-        (engine, events)
-    })
-    .await
-    .unwrap_or_else(|error| {
-        let engine = Engine::default();
-        (
-            engine,
-            vec![Event::AuthState {
-                signed_in: false,
-                email: String::new(),
-                status: format!("Supabase worker failed: {error}"),
-            }],
-        )
-    })
+    drop(request_tx);
+    // Do not await an in-flight HTTP request during UI teardown. Dropping the
+    // JoinHandle detaches the blocking task; the closed request channel makes the
+    // engine thread exit (and drop reqwest::blocking::Client there) afterward.
+    drop(blocking_worker);
 }
 
 fn handle_command(engine: &mut Engine, command: Command) -> Vec<Event> {
@@ -996,6 +1041,23 @@ mod tests {
     fn received_name_rejects_path_traversal() {
         assert_eq!(safe_received_name("../../secret.txt", "id"), "secret.txt");
         assert_eq!(safe_received_name("..", "abc"), "received-abc");
+    }
+
+    #[test]
+    fn blocking_client_lifecycle_stays_off_async_runtime_threads() {
+        let runtime = xilem::tokio::runtime::Runtime::new().expect("test Tokio runtime");
+        runtime.block_on(async {
+            let (request_tx, request_rx) = std::sync::mpsc::channel();
+            let (result_tx, mut result_rx) = xilem::tokio::sync::mpsc::unbounded_channel();
+            let worker = std::thread::spawn(move || run_blocking_engine(request_rx, result_tx));
+
+            request_tx.send(WorkerRequest::PollInbox).unwrap();
+            let result = result_rx.recv().await.expect("blocking worker response");
+            assert!(result.poll_completed);
+            assert!(result.events.is_empty());
+            drop(request_tx);
+            worker.join().expect("blocking worker joins cleanly");
+        });
     }
 
     #[test]

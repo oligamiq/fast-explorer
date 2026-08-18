@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"tailscale.com/client/local"
@@ -796,6 +797,64 @@ func downloadTaildriveFileTo(profile *profileBridge, srv *tsnet.Server, client *
 		return written, fmt.Errorf("close downloaded file: %w", closeErr)
 	}
 	return written, nil
+}
+
+func taildriveDownloadToFD(profileID, deviceID, share, remotePath string, destinationFD int) error {
+	if destinationFD < 0 {
+		return errors.New("invalid Taildrive stream file descriptor")
+	}
+	// Duplicate before any network work. Java owns the original pipe descriptor and
+	// may close it as soon as the DocumentsProvider call is cancelled.
+	dupFD, err := syscall.Dup(destinationFD)
+	if err != nil {
+		return fmt.Errorf("duplicate Taildrive stream descriptor: %w", err)
+	}
+	stream := os.NewFile(uintptr(dupFD), "taildrive-document-stream")
+	if stream == nil {
+		_ = syscall.Close(dupFD)
+		return errors.New("create Taildrive stream descriptor")
+	}
+	defer stream.Close()
+	normalizedPath, err := normalizeTaildriveBrowserPath(remotePath)
+	if err != nil {
+		return err
+	}
+	if normalizedPath == "" {
+		return errors.New("Taildrive file path is empty")
+	}
+	profile, srv, client, err := taildriveActiveContext(profileID, deviceID, share)
+	if err != nil {
+		return err
+	}
+	isDir, err := taildriveRemoteIsDirectory(profile, srv, client, deviceID, share, normalizedPath)
+	if err != nil {
+		return err
+	}
+	if isDir {
+		return errors.New("Taildrive stream target is a directory")
+	}
+	response, err := doTaildriveRequest(
+		profile,
+		srv,
+		client,
+		deviceID,
+		http.MethodGet,
+		taildriveRemotePath(share, normalizedPath, false),
+		nil,
+		nil,
+	)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		_, _ = io.Copy(io.Discard, response.Body)
+		return fmt.Errorf("Taildrive download rejected: %s", response.Status)
+	}
+	if _, copyErr := io.Copy(stream, response.Body); copyErr != nil {
+		return fmt.Errorf("stream Taildrive download: %w", copyErr)
+	}
+	return nil
 }
 
 func taildriveDownloadWithProgress(profileID, deviceID, share, remotePath, destination, transferID string) (retErr error) {

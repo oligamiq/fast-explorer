@@ -19,6 +19,9 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Locale;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -43,21 +46,21 @@ public final class TaildriveDocumentsProvider extends DocumentsProvider {
         DocumentsContract.Document.COLUMN_SIZE
     };
 
-    static {
-        System.loadLibrary("fast_explorer_android");
-    }
-
     private static native String nativeCall(String operation, String payload);
 
     private HandlerThread closeThread;
     private Handler closeHandler;
+    private ExecutorService streamExecutor;
     private File cacheDir;
+    private File filesDir;
+    private File shareRoot;
+    private boolean nativeInitialized;
 
     @Override
     public boolean onCreate() {
         if (getContext() == null) return false;
-        File filesDir = getContext().getFilesDir();
-        File shareRoot = Environment.getExternalStorageDirectory();
+        filesDir = getContext().getFilesDir();
+        shareRoot = Environment.getExternalStorageDirectory();
         cacheDir = new File(getContext().getCacheDir(), "taildrive-documents");
         if (!cacheDir.isDirectory() && !cacheDir.mkdirs()) {
             android.util.Log.e("FastExplorer", "cannot create DocumentsProvider cache");
@@ -65,15 +68,16 @@ public final class TaildriveDocumentsProvider extends DocumentsProvider {
         closeThread = new HandlerThread("FastExplorerDocumentsClose");
         closeThread.start();
         closeHandler = new Handler(closeThread.getLooper());
-        try {
-            call("init", new JSONObject()
-                    .put("files_dir", filesDir.getAbsolutePath())
-                    .put("share_root", shareRoot.getAbsolutePath()));
-            return true;
-        } catch (IOException | JSONException error) {
-            android.util.Log.e("FastExplorer", "DocumentsProvider init failed", error);
-            return false;
-        }
+        streamExecutor = Executors.newFixedThreadPool(4, runnable -> {
+            Thread thread = new Thread(runnable, "FastExplorerDocumentsStream");
+            thread.setDaemon(true);
+            return thread;
+        });
+        closeHandler.post(() -> cleanupStaleCache(cacheDir));
+        // Do not load the large Rust library while Android is installing content
+        // providers for the app process. Native TailDrive setup is deferred until
+        // the provider is actually asked for remote content.
+        return true;
     }
 
     @Override
@@ -188,12 +192,20 @@ public final class TaildriveDocumentsProvider extends DocumentsProvider {
         boolean writing = mode.indexOf('w') >= 0;
         boolean reading = mode.indexOf('r') >= 0;
         boolean truncate = mode.indexOf('t') >= 0;
+        boolean append = mode.indexOf('a') >= 0;
+        if (reading && !writing && !truncate) {
+            return openStreamingRead(doc, signal);
+        }
+        if (reading && writing && !truncate) {
+            throw new FileNotFoundException(
+                    "simultaneous read/write access to remote TailDrive files is not supported");
+        }
+        if (writing && append) {
+            throw new FileNotFoundException(
+                    "append access to remote TailDrive files is not supported");
+        }
         try {
-            if (reading && !truncate) {
-                call("download", remoteArgs(doc)
-                        .put("path", doc.path)
-                        .put("destination", local.getAbsolutePath()));
-            } else if (!local.exists() && !local.createNewFile()) {
+            if (!local.exists() && !local.createNewFile()) {
                 throw new IOException("cannot create cache file");
             }
             int parsedMode = ParcelFileDescriptor.parseMode(mode);
@@ -211,10 +223,68 @@ public final class TaildriveDocumentsProvider extends DocumentsProvider {
                     if (!local.delete() && local.exists()) local.deleteOnExit();
                 }
             });
-        } catch (IOException | JSONException error) {
+        } catch (IOException error) {
             if (!local.delete() && local.exists()) local.deleteOnExit();
             throw fileNotFound("cannot open TailDrive file", error);
         }
+    }
+
+    private ParcelFileDescriptor openStreamingRead(DocRef doc, CancellationSignal signal)
+            throws FileNotFoundException {
+        final ParcelFileDescriptor[] pipe;
+        final JSONObject request;
+        try {
+            pipe = ParcelFileDescriptor.createReliablePipe();
+            request = remoteArgs(doc)
+                    .put("path", doc.path)
+                    .put("fd", pipe[1].getFd());
+        } catch (IOException | JSONException error) {
+            throw fileNotFound("cannot create TailDrive read stream", error);
+        }
+
+        ParcelFileDescriptor readEnd = pipe[0];
+        ParcelFileDescriptor writeEnd = pipe[1];
+        AtomicBoolean cancelled = new AtomicBoolean(signal != null && signal.isCanceled());
+        if (signal != null) {
+            // Do not close writeEnd from the Binder cancellation callback: its numeric
+            // descriptor is handed to native code below, so closing it before the native
+            // bridge duplicates the fd could let Android recycle the number for another
+            // resource. The worker checks the flag before starting; once streaming starts,
+            // closing the client read end naturally terminates the pipe with EPIPE.
+            signal.setOnCancelListener(() -> cancelled.set(true));
+        }
+        try {
+            streamExecutor.execute(() -> {
+                if (cancelled.get()) {
+                    try {
+                        writeEnd.close();
+                    } catch (IOException ignored) {
+                        // Already closed by worker teardown.
+                    }
+                    return;
+                }
+                try {
+                    call("download_fd", request);
+                    writeEnd.close();
+                } catch (Exception error) {
+                    android.util.Log.e("FastExplorer", "TailDrive streaming download failed", error);
+                    try {
+                        writeEnd.closeWithError("TailDrive download failed: " + error.getMessage());
+                    } catch (IOException ignored) {
+                        // The client may have cancelled/closed the stream already.
+                    }
+                }
+            });
+        } catch (RuntimeException error) {
+            try {
+                readEnd.close();
+                writeEnd.close();
+            } catch (IOException ignored) {
+                // Best-effort descriptor cleanup if the executor is unavailable.
+            }
+            throw fileNotFound("TailDrive streaming worker is unavailable", error);
+        }
+        return readEnd;
     }
 
     @Override
@@ -329,7 +399,22 @@ public final class TaildriveDocumentsProvider extends DocumentsProvider {
         }
     }
 
+    private synchronized void ensureNativeInitialized() throws IOException {
+        if (nativeInitialized) return;
+        try {
+            System.loadLibrary("fast_explorer_android");
+            JSONObject payload = new JSONObject()
+                    .put("files_dir", filesDir.getAbsolutePath())
+                    .put("share_root", shareRoot.getAbsolutePath());
+            parseNativeResponse(nativeCall("init", payload.toString()));
+            nativeInitialized = true;
+        } catch (JSONException | UnsatisfiedLinkError error) {
+            throw new IOException("cannot initialize TailDrive native provider", error);
+        }
+    }
+
     private JSONObject call(String operation, JSONObject payload) throws IOException {
+        ensureNativeInitialized();
         try {
             if (getContext() != null) {
                 payload.put("_network_interfaces", FastExplorerNetwork.snapshot(getContext()));
@@ -337,7 +422,10 @@ public final class TaildriveDocumentsProvider extends DocumentsProvider {
         } catch (JSONException error) {
             throw new IOException("cannot encode Android network state", error);
         }
-        String raw = nativeCall(operation, payload.toString());
+        return parseNativeResponse(nativeCall(operation, payload.toString()));
+    }
+
+    private static JSONObject parseNativeResponse(String raw) throws IOException {
         try {
             JSONObject response = new JSONObject(raw);
             if (!response.optBoolean("ok", false)) {
@@ -361,6 +449,28 @@ public final class TaildriveDocumentsProvider extends DocumentsProvider {
         String suffix = doc.name.contains(".") ? doc.name.substring(doc.name.lastIndexOf('.')) : ".bin";
         if (suffix.length() > 24) suffix = ".bin";
         return new File(cacheDir, key + suffix);
+    }
+
+    private static void cleanupStaleCache(File root) {
+        File[] children = root == null ? null : root.listFiles();
+        if (children == null) return;
+        long staleBefore = System.currentTimeMillis() - 6L * 60L * 60L * 1000L;
+        for (File child : children) {
+            if (child.lastModified() >= staleBefore) continue;
+            deleteCacheEntry(child);
+        }
+    }
+
+    private static void deleteCacheEntry(File file) {
+        if (file.isDirectory()) {
+            File[] children = file.listFiles();
+            if (children != null) {
+                for (File child : children) deleteCacheEntry(child);
+            }
+        }
+        if (!file.delete() && file.exists()) {
+            android.util.Log.w("FastExplorer", "cannot remove stale TailDrive cache " + file);
+        }
     }
 
     private static String sha256Hex(String value) {

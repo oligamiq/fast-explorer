@@ -7,6 +7,7 @@ import static org.junit.Assert.assertTrue;
 
 import android.content.Context;
 import android.content.pm.PackageInfo;
+import android.content.pm.PackageInstaller;
 import android.os.Build;
 import com.android.bundle.Devices;
 import com.android.tools.build.bundletool.androidtools.Aapt2Command;
@@ -17,6 +18,7 @@ import androidx.test.platform.app.InstrumentationRegistry;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
+import java.util.List;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
@@ -120,6 +122,76 @@ public final class FastExplorerAabInstallerTest {
             }
             apkSet.delete();
             bundle.delete();
+        }
+    }
+
+    @Test
+    public void preparesSingleApkForPackageInstallerSession() throws Exception {
+        Context context = ApplicationProvider.getApplicationContext();
+        File installedApk = new File(context.getApplicationInfo().sourceDir).getCanonicalFile();
+        FastExplorerApksInstaller.PreparedInstall prepared =
+                FastExplorerApksInstaller.prepareSingleApk(context, installedApk);
+        try {
+            assertEquals(1, prepared.apkPaths.size());
+            assertEquals(installedApk.toPath(), prepared.apkPaths.get(0));
+            assertTrue(FastExplorerApksInstaller.isWorkingDirectory(
+                    context, prepared.workingDirectory.getAbsolutePath()));
+        } finally {
+            FastExplorerApksInstaller.deleteRecursively(prepared.workingDirectory);
+        }
+    }
+
+    @Test
+    public void blockedPackageInstallStatusKeepsAndroidDetails() {
+        String message = FastExplorerActivity.packageInstallFailureMessage(
+                PackageInstaller.STATUS_FAILURE_BLOCKED,
+                "Blocked by verifier",
+                "com.google.android.gms");
+        assertTrue(message.contains("blocked by Android or a security verifier"));
+        assertTrue(message.contains("Blocked by verifier"));
+        assertTrue(message.contains("com.google.android.gms"));
+    }
+
+    @Test
+    public void installerCacheSweepRemovesStaleArtifacts() throws Exception {
+        Context context = ApplicationProvider.getApplicationContext();
+        File staleWork = new File(context.getFilesDir(), "apks-install/stale-test");
+        File staleAab = new File(context.getFilesDir(), "aab-install/stale-test.apk");
+        assertTrue(staleWork.mkdirs() || staleWork.isDirectory());
+        assertTrue(staleAab.getParentFile().mkdirs() || staleAab.getParentFile().isDirectory());
+        try (FileOutputStream output = new FileOutputStream(staleAab)) {
+            output.write('x');
+        }
+        long old = System.currentTimeMillis() - 25L * 60L * 60L * 1000L;
+        assertTrue(staleWork.setLastModified(old));
+        assertTrue(staleAab.setLastModified(old));
+        FastExplorerApksInstaller.cleanupStaleArtifacts(context);
+        assertTrue(!staleWork.exists());
+        assertTrue(!staleAab.exists());
+    }
+
+    @Test
+    public void fileChangeNotifierIncludesNestedDirectoryFiles() throws Exception {
+        Context context = ApplicationProvider.getApplicationContext();
+        File root = new File(context.getCacheDir(), "file-change-tree");
+        File nested = new File(root, "nested");
+        assertTrue(nested.mkdirs() || nested.isDirectory());
+        File first = new File(root, "first.jpg");
+        File second = new File(nested, "second.mp3");
+        try (FileOutputStream output = new FileOutputStream(first)) {
+            output.write('a');
+        }
+        try (FileOutputStream output = new FileOutputStream(second)) {
+            output.write('b');
+        }
+        try {
+            List<String> targets =
+                    FastExplorerFileChangeNotifier.collectScanTargetsForTesting(root);
+            assertTrue(targets.contains(root.getCanonicalPath()));
+            assertTrue(targets.contains(first.getCanonicalPath()));
+            assertTrue(targets.contains(second.getCanonicalPath()));
+        } finally {
+            FastExplorerApksInstaller.deleteRecursively(root);
         }
     }
 }

@@ -7,15 +7,19 @@ import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.net.Uri;
 import android.os.Build;
 import androidx.annotation.Nullable;
 import com.google.firebase.FirebaseApp;
 import com.google.firebase.messaging.FirebaseMessaging;
+import java.util.UUID;
 
 final class FastExplorerPush {
     static final String CHANNEL_ID = "fast_explorer_sync";
     static final String ACTION_OPEN_DEVICE_SYNC =
             "dev.oligami.fastexplorer.action.OPEN_DEVICE_SYNC";
+    static final String EXTRA_SYNC_NOTIFICATION_TOKEN =
+            "dev.oligami.fastexplorer.extra.SYNC_NOTIFICATION_TOKEN";
     private static final String PREFS = "fast_explorer_push";
     private static final String KEY_FCM_TOKEN = "fcm_token";
 
@@ -58,8 +62,11 @@ final class FastExplorerPush {
 
     static void showNotification(Context context, String title, String detail) {
         ensureChannel(context);
+        String token = UUID.randomUUID().toString();
         Intent open = new Intent(context, FastExplorerActivity.class)
                 .setAction(ACTION_OPEN_DEVICE_SYNC)
+                .setData(Uri.parse("fastexplorer-sync://notification/" + token))
+                .putExtra(EXTRA_SYNC_NOTIFICATION_TOKEN, token)
                 .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
         PendingIntent pending = PendingIntent.getActivity(
                 context,

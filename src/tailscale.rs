@@ -416,6 +416,14 @@ mod ffi {
             destination: *const c_char,
             transfer_id: *const c_char,
         ) -> c_int;
+        #[cfg(target_os = "android")]
+        pub fn FE_TS_TaildriveDownloadToFD(
+            profile_id: *const c_char,
+            device_id: *const c_char,
+            share: *const c_char,
+            remote_path: *const c_char,
+            destination_fd: c_int,
+        ) -> c_int;
         pub fn FE_TS_TaildriveUploadProgress(
             profile_id: *const c_char,
             device_id: *const c_char,
@@ -1372,6 +1380,47 @@ pub fn taildrive_download(
     let destination = c_string(&destination.to_string_lossy(), "download destination")?;
     let transfer_id = c_string(transfer_id, "Taildrive transfer ID")?;
     bridge_taildrive_download(&profile, &device, &share, &path, &destination, &transfer_id)
+}
+
+#[cfg(all(target_os = "android", fastexplorer_tsnet))]
+pub fn taildrive_download_to_fd(
+    profile_id: &str,
+    device_id: &str,
+    share: &str,
+    remote_path: &str,
+    destination_fd: i32,
+) -> Result<(), String> {
+    let profile = c_string(profile_id, "Tailscale profile ID")?;
+    let device = c_string(device_id, "Taildrive device ID")?;
+    let share = c_string(share, "Taildrive share")?;
+    let path = c_string(remote_path, "Taildrive path")?;
+    // SAFETY: all strings are valid NUL-terminated pointers for this synchronous call;
+    // the bridge duplicates destination_fd before taking ownership of its stream copy.
+    if unsafe {
+        ffi::FE_TS_TaildriveDownloadToFD(
+            profile.as_ptr(),
+            device.as_ptr(),
+            share.as_ptr(),
+            path.as_ptr(),
+            destination_fd,
+        )
+    } == 1
+    {
+        Ok(())
+    } else {
+        Err(bridge_last_error(&profile))
+    }
+}
+
+#[cfg(all(target_os = "android", not(fastexplorer_tsnet)))]
+pub fn taildrive_download_to_fd(
+    _profile_id: &str,
+    _device_id: &str,
+    _share: &str,
+    _remote_path: &str,
+    _destination_fd: i32,
+) -> Result<(), String> {
+    Err("embedded Tailscale bridge is unavailable".to_owned())
 }
 
 pub fn taildrive_upload(

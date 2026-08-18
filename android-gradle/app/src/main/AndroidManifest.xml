@@ -49,6 +49,10 @@
             </intent-filter>
         </service>
 
+        <receiver
+            android:name="dev.oligami.fastexplorer.FastExplorerInstallStatusReceiver"
+            android:exported="false" />
+
         <meta-data
             android:name="com.google.firebase.messaging.default_notification_channel_id"
             android:value="fast_explorer_sync" />
@@ -56,7 +60,7 @@
         <activity
             android:name="dev.oligami.fastexplorer.FastExplorerActivity"
             android:launchMode="singleTop"
-            android:configChanges="orientation|keyboard|keyboardHidden|screenLayout|screenSize|smallestScreenSize"
+            android:configChanges="orientation|keyboard|keyboardHidden|screenLayout|screenSize|smallestScreenSize|uiMode"
             android:enableOnBackInvokedCallback="true"
             android:exported="true">
             <meta-data

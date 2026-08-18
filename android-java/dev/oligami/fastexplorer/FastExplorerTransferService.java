@@ -26,8 +26,9 @@ public final class FastExplorerTransferService extends Service {
     }
 
     private static native String nativeTransferSnapshotJson();
+    private static native String nativeDrainFileChangesJson();
     private static native void nativeUpdateNetworkInterfaces(String json);
-    private static native void nativeControlTransfer(String transferId, String action);
+    private static native String nativeControlTransfer(String transferId, String action);
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private NotificationManager notificationManager;
@@ -54,12 +55,30 @@ public final class FastExplorerTransferService extends Service {
         if (notificationManager != null) {
             notificationManager.cancel(COMPLETION_NOTIFICATION_ID);
         }
-        startAsForeground(buildStartingNotification());
-        if (intent != null) {
-            String transferId = intent.getStringExtra("transfer_id");
-            String action = intent.getStringExtra("transfer_action");
-            if (transferId != null && action != null) {
-                nativeControlTransfer(transferId, action);
+        String transferId = intent == null ? null : intent.getStringExtra("transfer_id");
+        String action = intent == null ? null : intent.getStringExtra("transfer_action");
+        Notification initial = buildStartingNotification();
+        if (transferId != null && action != null) {
+            try {
+                JSONObject snapshot = new JSONObject(nativeTransferSnapshotJson());
+                int activeCount = snapshot.optInt("active_count", 0);
+                JSONObject primary = snapshot.optJSONObject("primary");
+                if (activeCount > 0 && primary != null) {
+                    initial = buildProgressNotification(activeCount, primary);
+                }
+            } catch (JSONException | RuntimeException error) {
+                android.util.Log.w("FastExplorer", "cannot restore transfer notification", error);
+            }
+        }
+        // Every startForegroundService entry still acknowledges the foreground contract,
+        // but notification actions reuse the current snapshot instead of flashing Starting….
+        startAsForeground(initial);
+        if (transferId != null && action != null) {
+            String controlError = nativeControlTransfer(transferId, action);
+            if (controlError != null && !controlError.isEmpty()) {
+                android.util.Log.w(
+                        "FastExplorer",
+                        "cannot " + action + " transfer " + transferId + ": " + controlError);
             }
         }
         handler.removeCallbacks(pollTransfers);
@@ -89,21 +108,32 @@ public final class FastExplorerTransferService extends Service {
     public void onTimeout(int startId, int fgsType) {
         if (Build.VERSION.SDK_INT >= 35
                 && (fgsType & ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC) != 0) {
+            // onTimeout and pollTransfers both run on the main looper. Remove the
+            // queued poll before posting the terminal warning; otherwise a final poll
+            // can immediately cancel or overwrite that warning before onDestroy runs.
+            handler.removeCallbacks(pollTransfers);
+            boolean quiesced = false;
+            String detail;
             try {
-                JSONObject snapshot = new JSONObject(nativeTransferSnapshotJson());
-                JSONObject primary = snapshot.optJSONObject("primary");
-                if (primary != null) {
-                    String transferId = primary.optString("transfer_id", "");
-                    if (!transferId.isEmpty() && primary.optBoolean("can_pause", false)) {
-                        nativeControlTransfer(transferId, "pause");
-                    }
-                }
+                // Android is about to revoke the data-sync foreground-service window.
+                // Quiesce every native transfer before dropping foreground state so no
+                // second transfer is left doing background network or filesystem work.
+                // Pausing is preferred; workers that cannot pause are cancelled safely.
+                String controlError = nativeControlTransfer("", "quiesce_all");
+                quiesced = controlError == null || controlError.isEmpty();
+                detail = quiesced
+                        ? "Android limited long-running data sync. Active transfers were paused, "
+                                + "or cancelled when pausing was not safe. Reopen FastExplorer to continue."
+                        : "Android stopped the transfer service, but some transfer work could not be "
+                                + "safely suspended: " + controlError
+                                + ". Reopen FastExplorer to verify its status.";
             } catch (Exception error) {
-                android.util.Log.w("FastExplorer", "cannot pause transfer after service timeout", error);
+                android.util.Log.w("FastExplorer", "cannot suspend transfers after service timeout", error);
+                detail = "Android stopped the transfer service and FastExplorer could not confirm whether "
+                        + "all transfers were suspended. Reopen FastExplorer to check their status.";
             }
             postTerminalNotification(
-                    "Transfer paused",
-                    "Android limited this long-running transfer. Reopen FastExplorer to resume it.");
+                    quiesced ? "Transfers suspended" : "Transfer service stopped", detail);
             stopForeground(STOP_FOREGROUND_REMOVE);
             stopSelf(startId);
         }
@@ -161,6 +191,7 @@ public final class FastExplorerTransferService extends Service {
             if ((networkPolls++ % 4) == 0) {
                 nativeUpdateNetworkInterfaces(FastExplorerNetwork.snapshot(this));
             }
+            FastExplorerFileChangeNotifier.notifyChanges(this, nativeDrainFileChangesJson());
             JSONObject snapshot = new JSONObject(nativeTransferSnapshotJson());
             int activeCount = snapshot.optInt("active_count", 0);
             JSONObject primary = snapshot.optJSONObject("primary");
@@ -186,10 +217,23 @@ public final class FastExplorerTransferService extends Service {
                 return;
             }
         }
+        if (sawActiveTransfer && notificationManager != null) {
+            try {
+                JSONObject snapshot = new JSONObject(nativeTransferSnapshotJson());
+                JSONObject primary = snapshot.optJSONObject("primary");
+                if (primary != null) {
+                    String phase = primary.optString("phase", "Completed");
+                    String label = primary.optString("label", "File transfer");
+                    String detail = primary.optString("detail", phase);
+                    postTerminalNotification(phase + ": " + label, detail);
+                }
+            } catch (JSONException | RuntimeException error) {
+                android.util.Log.w("FastExplorer", "cannot post terminal transfer notification", error);
+            }
+        }
         stopForeground(STOP_FOREGROUND_REMOVE);
         if (notificationManager != null) {
             notificationManager.cancel(FOREGROUND_NOTIFICATION_ID);
-            notificationManager.cancel(COMPLETION_NOTIFICATION_ID);
         }
         stopSelf();
     }

@@ -49,6 +49,7 @@ struct TransferRecord {
     job: TransferJob,
     protected_files: BTreeSet<String>,
     resume_phase: String,
+    pause_override: Option<bool>,
     cancel_requested: bool,
     last_sample_at: Instant,
     last_sample_bytes: u64,
@@ -58,6 +59,7 @@ struct TransferRecord {
 struct TransferState {
     records: Vec<TransferRecord>,
     events: VecDeque<UiEvent>,
+    system_file_changes: VecDeque<PathBuf>,
     batch_failed_count: usize,
     batch_last_finished: Option<String>,
 }
@@ -140,11 +142,23 @@ fn register_transfer(
         job,
         protected_files,
         resume_phase: phase,
+        pause_override: None,
         cancel_requested: false,
         last_sample_at: now,
         last_sample_bytes: 0,
     });
     mark_ui_changed();
+}
+
+fn reconcile_pause_progress(pause_override: &mut Option<bool>, reported_paused: bool) -> bool {
+    if let Some(desired_paused) = *pause_override {
+        if reported_paused == desired_paused {
+            *pause_override = None;
+        }
+        desired_paused
+    } else {
+        reported_paused
+    }
 }
 
 fn update_taildrive_progress(
@@ -159,7 +173,11 @@ fn update_taildrive_progress(
     else {
         return;
     };
-    record.snapshot.paused = progress.paused || record.snapshot.paused;
+    // pause()/resume() complete before they update the UI snapshot. A progress
+    // callback already in flight can therefore describe the previous control state.
+    // Keep the explicit user command authoritative until the transfer reports that
+    // same state, then resume following progress normally.
+    record.snapshot.paused = reconcile_pause_progress(&mut record.pause_override, progress.paused);
     if progress.cancelled {
         record.cancel_requested = true;
         record.snapshot.cancelling = true;
@@ -239,6 +257,7 @@ fn finish_transfer(transfer_id: &str, error: Option<String>) {
             .as_deref()
             .is_some_and(|message| message.eq_ignore_ascii_case("transfer cancelled"));
     record.snapshot.done = true;
+    record.pause_override = None;
     record.snapshot.paused = false;
     record.snapshot.cancelling = false;
     record.snapshot.cancelled = cancelled;
@@ -267,6 +286,25 @@ fn finish_transfer(transfer_id: &str, error: Option<String>) {
 fn push_event(event: UiEvent) {
     lock_state().events.push_back(event);
     mark_ui_changed();
+}
+
+fn queue_system_file_changes(paths: impl IntoIterator<Item = PathBuf>) {
+    let mut state = lock_state();
+    for path in paths {
+        if !state.system_file_changes.contains(&path) {
+            state.system_file_changes.push_back(path);
+        }
+    }
+}
+
+fn drain_system_file_changes_json() -> String {
+    let mut state = lock_state();
+    let paths = state
+        .system_file_changes
+        .drain(..)
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    serde_json::to_string(&paths).unwrap_or_else(|_| "[]".to_owned())
 }
 
 pub(crate) fn snapshots() -> Vec<TransferSnapshot> {
@@ -377,6 +415,71 @@ fn measure_local_path(path: &Path) -> Result<(u64, u64), String> {
     }
 }
 
+fn apply_local_metadata(metadata: &std::fs::Metadata, destination: &Path) {
+    // Apply timestamps while the freshly-created destination still has writable/readable
+    // creator permissions. A source may intentionally be 0222/0111; applying those mode
+    // bits first can make reopening the destination impossible before timestamps are set.
+    let mut times = std::fs::FileTimes::new();
+    if let Ok(accessed) = metadata.accessed() {
+        times = times.set_accessed(accessed);
+    }
+    if let Ok(modified) = metadata.modified() {
+        times = times.set_modified(modified);
+    }
+    match std::fs::File::open(destination) {
+        Ok(file) => {
+            if let Err(error) = file.set_times(times) {
+                eprintln!(
+                    "FastExplorer: cannot preserve timestamps for {}: {error}",
+                    destination.display()
+                );
+            }
+        }
+        Err(error) => eprintln!(
+            "FastExplorer: cannot reopen {} to preserve timestamps: {error}",
+            destination.display()
+        ),
+    }
+    if let Err(error) = std::fs::set_permissions(destination, metadata.permissions()) {
+        // Shared-storage/FUSE volumes may not implement POSIX mode changes. The copy
+        // itself is still valid, so metadata preservation remains best-effort there.
+        eprintln!(
+            "FastExplorer: cannot preserve permissions for {}: {error}",
+            destination.display()
+        );
+    }
+}
+
+fn copy_local_symlink_controlled(
+    transfer_id: &str,
+    source: &Path,
+    destination: &Path,
+    bytes_done: &mut u64,
+    items_done: &mut u64,
+    bytes_total: u64,
+    items_total: u64,
+) -> Result<(), String> {
+    wait_local_control(transfer_id)?;
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let target = std::fs::read_link(source).map_err(|error| error.to_string())?;
+    std::os::unix::fs::symlink(target, destination).map_err(|error| error.to_string())?;
+    let size = std::fs::symlink_metadata(source)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    *bytes_done = bytes_done.saturating_add(size);
+    *items_done = items_done.saturating_add(1);
+    update_local_progress(
+        transfer_id,
+        *bytes_done,
+        bytes_total,
+        *items_done,
+        items_total,
+    );
+    Ok(())
+}
+
 fn copy_local_file_controlled(
     transfer_id: &str,
     source: &Path,
@@ -389,6 +492,7 @@ fn copy_local_file_controlled(
     if let Some(parent) = destination.parent() {
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
+    let metadata = std::fs::symlink_metadata(source).map_err(|error| error.to_string())?;
     let mut input = std::fs::File::open(source).map_err(|error| error.to_string())?;
     let mut output = std::fs::File::create(destination).map_err(|error| error.to_string())?;
     let mut buffer = vec![0u8; 256 * 1024];
@@ -411,6 +515,8 @@ fn copy_local_file_controlled(
         );
     }
     output.flush().map_err(|error| error.to_string())?;
+    drop(output);
+    apply_local_metadata(&metadata, destination);
     *items_done = items_done.saturating_add(1);
     update_local_progress(
         transfer_id,
@@ -433,7 +539,18 @@ fn copy_local_path_controlled(
 ) -> Result<(), String> {
     wait_local_control(transfer_id)?;
     let metadata = std::fs::symlink_metadata(source).map_err(|error| error.to_string())?;
-    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+    if metadata.file_type().is_symlink() {
+        return copy_local_symlink_controlled(
+            transfer_id,
+            source,
+            destination,
+            bytes_done,
+            items_done,
+            bytes_total,
+            items_total,
+        );
+    }
+    if metadata.is_dir() {
         std::fs::create_dir(destination).map_err(|error| error.to_string())?;
         *items_done = items_done.saturating_add(1);
         update_local_progress(
@@ -455,6 +572,7 @@ fn copy_local_path_controlled(
                 items_total,
             )?;
         }
+        apply_local_metadata(&metadata, destination);
         Ok(())
     } else {
         copy_local_file_controlled(
@@ -478,11 +596,154 @@ fn remove_local_path(path: &Path) -> Result<(), String> {
     }
 }
 
+fn remove_local_path_controlled(transfer_id: &str, path: &Path) -> Result<(), String> {
+    wait_local_control(transfer_id)?;
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        loop {
+            wait_local_control(transfer_id)?;
+            let entries = std::fs::read_dir(path)
+                .map_err(|error| error.to_string())?
+                .take(128)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())?;
+            if entries.is_empty() {
+                break;
+            }
+            for entry in entries {
+                remove_local_path_controlled(transfer_id, &entry.path())?;
+            }
+        }
+        std::fs::remove_dir(path).map_err(|error| error.to_string())
+    } else {
+        std::fs::remove_file(path).map_err(|error| error.to_string())
+    }
+}
+
+fn remove_local_path_in_background(path: PathBuf) {
+    let display = crate::app::display_path(&path);
+    let cleanup_path = path.clone();
+    let spawn = std::thread::Builder::new()
+        .name("fast-explorer-replace-cleanup".to_owned())
+        .spawn(move || {
+            for attempt in 0..3 {
+                match remove_local_path(&cleanup_path) {
+                    Ok(()) => return,
+                    Err(_) if !cleanup_path.symlink_metadata().is_ok() => return,
+                    Err(error) if attempt < 2 => {
+                        eprintln!(
+                            "FastExplorer: replace backup cleanup retry {} for {}: {error}",
+                            attempt + 1,
+                            cleanup_path.display()
+                        );
+                        std::thread::sleep(std::time::Duration::from_millis(250));
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "FastExplorer: replace backup cleanup failed for {}: {error}",
+                            cleanup_path.display()
+                        );
+                    }
+                }
+            }
+        });
+    if let Err(error) = spawn {
+        eprintln!("FastExplorer: cannot schedule replace backup cleanup for {display}: {error}");
+        if let Err(cleanup_error) = remove_local_path(&path) {
+            eprintln!(
+                "FastExplorer: synchronous replace backup cleanup also failed for {display}: {cleanup_error}"
+            );
+        }
+    }
+}
+
 fn local_staging_path(destination: &Path, transfer_id: &str) -> PathBuf {
     destination
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join(format!(".fastexplorer-transfer-{transfer_id}"))
+}
+
+fn local_replace_backup_path(destination: &Path, transfer_id: &str) -> Result<PathBuf, String> {
+    let parent = destination
+        .parent()
+        .ok_or_else(|| "replace destination has no parent directory".to_owned())?;
+    for suffix in 0..10_000u32 {
+        let candidate = parent.join(format!(
+            ".fastexplorer-replace-backup-{transfer_id}-{suffix}"
+        ));
+        if !candidate.symlink_metadata().is_ok() {
+            return Ok(candidate);
+        }
+    }
+    Err("cannot allocate a temporary replace backup path".to_owned())
+}
+
+fn merge_staging_entry_controlled(
+    transfer_id: &str,
+    source: &Path,
+    destination: &Path,
+) -> Result<(), String> {
+    wait_local_control(transfer_id)?;
+    if !destination.symlink_metadata().is_ok() {
+        return std::fs::rename(source, destination).map_err(|error| error.to_string());
+    }
+
+    let source_metadata = std::fs::symlink_metadata(source).map_err(|error| error.to_string())?;
+    let destination_metadata =
+        std::fs::symlink_metadata(destination).map_err(|error| error.to_string())?;
+    let source_dir = source_metadata.is_dir() && !source_metadata.file_type().is_symlink();
+    let destination_dir =
+        destination_metadata.is_dir() && !destination_metadata.file_type().is_symlink();
+
+    if source_dir && destination_dir {
+        loop {
+            wait_local_control(transfer_id)?;
+            let entries = std::fs::read_dir(source)
+                .map_err(|error| error.to_string())?
+                .take(128)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())?;
+            if entries.is_empty() {
+                break;
+            }
+            for entry in entries {
+                merge_staging_entry_controlled(
+                    transfer_id,
+                    &entry.path(),
+                    &destination.join(entry.file_name()),
+                )?;
+            }
+        }
+        return std::fs::remove_dir(source).map_err(|error| error.to_string());
+    }
+
+    if !source_dir && !destination_dir && std::fs::rename(source, destination).is_ok() {
+        // Android/Linux rename atomically replaces an existing non-directory entry.
+        return Ok(());
+    }
+
+    // Type conflicts (file <-> directory), or an OEM/filesystem that refused the
+    // direct replace above, use a same-filesystem backup so the old destination can
+    // be restored if publishing the staged entry fails. Deleting a large replaced
+    // directory remains pause/cancel-aware instead of blocking in a final fs::copy.
+    let backup = local_replace_backup_path(destination, transfer_id)?;
+    std::fs::rename(destination, &backup).map_err(|error| error.to_string())?;
+    if let Err(error) = std::fs::rename(source, destination) {
+        let rollback = std::fs::rename(&backup, destination);
+        return Err(match rollback {
+            Ok(()) => error.to_string(),
+            Err(rollback_error) => format!(
+                "cannot publish replacement ({error}); rollback also failed: {rollback_error}"
+            ),
+        });
+    }
+    // Once the staged entry has been published, this backup is no longer part of the
+    // user's transfer result. Delete it off the transfer worker so a large old tree or
+    // a transient filesystem lock cannot hold progress at 99% or turn a successful
+    // replacement into a reported failure.
+    remove_local_path_in_background(backup);
+    Ok(())
 }
 
 fn publish_local_staging(
@@ -492,8 +753,8 @@ fn publish_local_staging(
     replace: bool,
 ) -> Result<(), String> {
     wait_local_control(transfer_id)?;
-    set_transfer_phase(transfer_id, "Finishing");
     if !destination.exists() {
+        set_transfer_phase(transfer_id, "Finishing");
         return std::fs::rename(staging, destination).map_err(|error| error.to_string());
     }
     if !replace {
@@ -502,34 +763,14 @@ fn publish_local_staging(
             crate::app::display_path(destination)
         ));
     }
-    let staging_meta = std::fs::symlink_metadata(staging).map_err(|error| error.to_string())?;
-    let destination_meta =
-        std::fs::symlink_metadata(destination).map_err(|error| error.to_string())?;
-    let staging_dir = staging_meta.is_dir() && !staging_meta.file_type().is_symlink();
-    let destination_dir = destination_meta.is_dir() && !destination_meta.file_type().is_symlink();
-    if staging_dir && destination_dir {
-        let merge_command = crate::app::LocalFileCommand::CopyMove {
-            current: destination
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .to_path_buf(),
-            source: staging.to_path_buf(),
-            destination: destination.to_path_buf(),
-            cut: true,
-            replace: true,
-        };
-        return crate::app::perform_local_file_command(&merge_command);
-    }
-    let backup = destination.with_file_name(format!(".fastexplorer-replace-backup-{transfer_id}"));
-    if backup.exists() {
-        remove_local_path(&backup)?;
-    }
-    std::fs::rename(destination, &backup).map_err(|error| error.to_string())?;
-    if let Err(error) = std::fs::rename(staging, destination) {
-        let _ = std::fs::rename(&backup, destination);
-        return Err(error.to_string());
-    }
-    let _ = remove_local_path(&backup);
+
+    // The staging entry lives beside the destination on the same filesystem.
+    // Merge by rename instead of copying the full payload a second time. Keep the
+    // phase controllable while walking conflicting directories and deleting old
+    // replacements; only the final trivial state transition is marked Finishing.
+    set_transfer_phase(transfer_id, "Merging");
+    merge_staging_entry_controlled(transfer_id, staging, destination)?;
+    set_transfer_phase(transfer_id, "Finishing");
     Ok(())
 }
 
@@ -576,7 +817,9 @@ fn perform_local_transfer(
         return Err(error);
     }
     if *cut {
-        remove_local_path(source)?;
+        set_transfer_phase(transfer_id, "Removing source");
+        remove_local_path_controlled(transfer_id, source)?;
+        set_transfer_phase(transfer_id, "Finishing");
     }
     Ok(())
 }
@@ -632,6 +875,15 @@ fn spawn_taildrive_job(transfer_id: String, command: crate::tailscale::Command) 
             match event {
                 Some(event) => {
                     let error = taildrive_event_error(&event);
+                    if let crate::tailscale::Event::TaildriveDownload {
+                        destination,
+                        open_after: false,
+                        result: Ok(()),
+                        ..
+                    } = &event
+                    {
+                        queue_system_file_changes([destination.clone()]);
+                    }
                     finish_transfer(&thread_id, error);
                     push_event(UiEvent::Tailscale(event));
                 }
@@ -658,6 +910,20 @@ fn spawn_local_job(transfer_id: String, command: crate::app::LocalFileCommand) {
         .name(format!("fast-explorer-transfer-{transfer_id}"))
         .spawn(move || {
             let result = perform_local_transfer(&thread_id, &worker_command);
+            if result.is_ok()
+                && let crate::app::LocalFileCommand::CopyMove {
+                    source,
+                    destination,
+                    cut,
+                    ..
+                } = &worker_command
+            {
+                if *cut {
+                    queue_system_file_changes([source.clone(), destination.clone()]);
+                } else {
+                    queue_system_file_changes([destination.clone()]);
+                }
+            }
             let error = result.as_ref().err().cloned();
             finish_transfer(&thread_id, error);
             push_event(UiEvent::Local {
@@ -777,6 +1043,7 @@ pub(crate) fn pause(transfer_id: &str) -> Result<(), String> {
         .iter_mut()
         .find(|record| record.snapshot.transfer_id == transfer_id && !record.snapshot.done)
     {
+        record.pause_override = Some(true);
         record.snapshot.paused = true;
         record.snapshot.phase = "Paused".to_owned();
         record.snapshot.bytes_per_second = 0.0;
@@ -810,6 +1077,7 @@ pub(crate) fn resume(transfer_id: &str) -> Result<(), String> {
         .iter_mut()
         .find(|record| record.snapshot.transfer_id == transfer_id && !record.snapshot.done)
     {
+        record.pause_override = Some(false);
         record.snapshot.paused = false;
         record.snapshot.phase = record.resume_phase.clone();
         record.last_sample_at = Instant::now();
@@ -824,32 +1092,80 @@ pub(crate) fn resume(transfer_id: &str) -> Result<(), String> {
 
 pub(crate) fn cancel(transfer_id: &str) -> Result<(), String> {
     let job = {
-        let mut state = lock_state();
-        let Some(record) = state
+        let state = lock_state();
+        let record = state
             .records
-            .iter_mut()
+            .iter()
             .find(|record| record.snapshot.transfer_id == transfer_id && !record.snapshot.done)
-        else {
-            return Err("transfer is not active".to_owned());
-        };
+            .ok_or_else(|| "transfer is not active".to_owned())?;
         if record.snapshot.cancelling {
             return Ok(());
         }
         if record.snapshot.phase.starts_with("Finishing") {
             return Err("transfer is already being committed".to_owned());
         }
-        record.cancel_requested = true;
-        record.snapshot.paused = false;
-        record.snapshot.cancelling = true;
-        record.snapshot.phase = "Cancelling".to_owned();
-        mark_ui_changed();
         record.job.clone()
     };
-    control_cv().notify_all();
+
     if let TransferJob::Tailscale(command) = &job {
-        let _ = control_taildrive_job(command, transfer_id, "cancel");
+        control_taildrive_job(command, transfer_id, "cancel")
+            .map_err(|_| "cannot cancel transfer right now".to_owned())?;
     }
+
+    let mut state = lock_state();
+    let Some(record) = state
+        .records
+        .iter_mut()
+        .find(|record| record.snapshot.transfer_id == transfer_id && !record.snapshot.done)
+    else {
+        return Err("transfer is no longer active".to_owned());
+    };
+    if record.snapshot.phase.starts_with("Finishing") {
+        return Err("transfer is already being committed".to_owned());
+    }
+    record.cancel_requested = true;
+    record.pause_override = None;
+    record.snapshot.paused = false;
+    record.snapshot.cancelling = true;
+    record.snapshot.phase = "Cancelling".to_owned();
+    mark_ui_changed();
+    drop(state);
+    control_cv().notify_all();
     Ok(())
+}
+
+fn transfer_is_active(transfer_id: &str) -> bool {
+    lock_state()
+        .records
+        .iter()
+        .any(|record| record.snapshot.transfer_id == transfer_id && !record.snapshot.done)
+}
+
+fn quiesce_all_for_service_timeout() -> Result<(), String> {
+    let transfer_ids = {
+        let state = lock_state();
+        state
+            .records
+            .iter()
+            .filter(|record| !record.snapshot.done)
+            .map(|record| record.snapshot.transfer_id.clone())
+            .collect::<Vec<_>>()
+    };
+    let mut failures = Vec::new();
+    for transfer_id in transfer_ids {
+        if pause(&transfer_id).is_ok() {
+            continue;
+        }
+        if cancel(&transfer_id).is_ok() || !transfer_is_active(&transfer_id) {
+            continue;
+        }
+        failures.push(transfer_id);
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("could not safely suspend: {}", failures.join(", ")))
+    }
 }
 
 fn initial_phase(job: &TransferJob) -> String {
@@ -904,6 +1220,7 @@ pub(crate) fn retry(transfer_id: &str) -> Result<(), String> {
         record.snapshot.done = false;
         record.snapshot.error = None;
         record.snapshot.bytes_per_second = 0.0;
+        record.pause_override = None;
         record.cancel_requested = false;
         record.last_sample_at = Instant::now();
         record.last_sample_bytes = 0;
@@ -1067,6 +1384,20 @@ pub extern "system" fn Java_dev_oligami_fastexplorer_FastExplorerTransferService
 }
 
 #[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_oligami_fastexplorer_FastExplorerTransferService_nativeDrainFileChangesJson<
+    'local,
+>(
+    mut unowned_env: jni::EnvUnowned<'local>,
+    _class: JClass<'local>,
+) -> JString<'local> {
+    let json = drain_system_file_changes_json();
+    let outcome = unowned_env.with_env(|env| -> Result<JString<'local>, jni::errors::Error> {
+        JString::from_str(env, json)
+    });
+    outcome.resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_oligami_fastexplorer_FastExplorerTransferService_nativeUpdateNetworkInterfaces<
     'local,
 >(
@@ -1092,26 +1423,317 @@ pub extern "system" fn Java_dev_oligami_fastexplorer_FastExplorerTransferService
     _class: JClass<'local>,
     transfer_id: JString<'local>,
     action: JString<'local>,
-) {
-    let outcome = unowned_env.with_env(|env| -> Result<(), jni::errors::Error> {
+) -> JString<'local> {
+    let outcome = unowned_env.with_env(|env| -> Result<JString<'local>, jni::errors::Error> {
         let transfer_id = transfer_id.try_to_string(env)?;
         let action = action.try_to_string(env)?;
-        match action.as_str() {
-            "pause" => {
-                let _ = pause(&transfer_id);
-            }
-            "resume" => {
-                let _ = resume(&transfer_id);
-            }
-            "cancel" => {
-                let _ = cancel(&transfer_id);
-            }
-            "retry" => {
-                let _ = retry(&transfer_id);
-            }
-            _ => {}
-        }
-        Ok(())
+        let result = match action.as_str() {
+            "pause" => pause(&transfer_id),
+            "resume" => resume(&transfer_id),
+            "cancel" => cancel(&transfer_id),
+            "retry" => retry(&transfer_id),
+            "quiesce_all" => quiesce_all_for_service_timeout(),
+            _ => Err(format!("unsupported transfer action: {action}")),
+        };
+        JString::from_str(env, result.err().unwrap_or_default())
     });
     outcome.resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+    use std::fs;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{Duration, UNIX_EPOCH};
+
+    use super::{
+        TransferJob, copy_local_path_controlled, finish_transfer, merge_staging_entry_controlled,
+        reconcile_pause_progress, register_transfer,
+    };
+
+    static TEST_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn stale_paused_progress_cannot_undo_resume() {
+        let mut pause_override = Some(false);
+        assert!(!reconcile_pause_progress(&mut pause_override, true));
+        assert_eq!(pause_override, Some(false));
+        assert!(!reconcile_pause_progress(&mut pause_override, false));
+        assert_eq!(pause_override, None);
+    }
+
+    #[test]
+    fn stale_running_progress_cannot_undo_pause() {
+        let mut pause_override = Some(true);
+        assert!(reconcile_pause_progress(&mut pause_override, false));
+        assert_eq!(pause_override, Some(true));
+        assert!(reconcile_pause_progress(&mut pause_override, true));
+        assert_eq!(pause_override, None);
+    }
+
+    #[test]
+    fn existing_directory_merge_moves_staging_entries_without_second_copy() {
+        let sequence = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "fast-explorer-android-merge-test-{}-{sequence}",
+            std::process::id()
+        ));
+        let staging = root.join("staging");
+        let destination = root.join("destination");
+        fs::create_dir_all(staging.join("nested")).expect("create staging");
+        fs::create_dir_all(destination.join("nested")).expect("create destination");
+        fs::write(staging.join("new.txt"), b"new").expect("new file");
+        fs::write(staging.join("replace.txt"), b"replacement").expect("replacement file");
+        fs::write(staging.join("nested/replace.txt"), b"nested replacement")
+            .expect("nested replacement");
+        fs::write(destination.join("keep.txt"), b"keep").expect("keep file");
+        fs::write(destination.join("replace.txt"), b"old").expect("old file");
+        fs::write(destination.join("nested/keep.txt"), b"nested keep").expect("nested keep");
+        fs::write(destination.join("nested/replace.txt"), b"nested old").expect("nested old");
+
+        let moved_inode = fs::metadata(staging.join("new.txt"))
+            .expect("staging metadata")
+            .ino();
+        let transfer_id = format!("android-merge-test-{sequence}");
+        register_transfer(
+            transfer_id.clone(),
+            "merge test".to_owned(),
+            "Merging".to_owned(),
+            BTreeSet::new(),
+            TransferJob::Local(crate::app::LocalFileCommand::CopyMove {
+                current: root.clone(),
+                source: root.join("source"),
+                destination: destination.clone(),
+                cut: false,
+                replace: true,
+            }),
+        );
+
+        let result = merge_staging_entry_controlled(&transfer_id, &staging, &destination);
+        finish_transfer(&transfer_id, result.as_ref().err().cloned());
+        result.expect("merge staging directory");
+
+        assert!(!staging.exists());
+        assert_eq!(fs::read(destination.join("keep.txt")).unwrap(), b"keep");
+        assert_eq!(
+            fs::read(destination.join("replace.txt")).unwrap(),
+            b"replacement"
+        );
+        assert_eq!(
+            fs::read(destination.join("nested/keep.txt")).unwrap(),
+            b"nested keep"
+        );
+        assert_eq!(
+            fs::read(destination.join("nested/replace.txt")).unwrap(),
+            b"nested replacement"
+        );
+        assert_eq!(
+            fs::metadata(destination.join("new.txt")).unwrap().ino(),
+            moved_inode,
+            "publishing should preserve the staged inode instead of copying bytes again"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn controlled_copy_preserves_directory_symlinks() {
+        let sequence = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "fast-explorer-android-symlink-test-{}-{sequence}",
+            std::process::id()
+        ));
+        let source_root = root.join("source");
+        let target_dir = source_root.join("target");
+        let link = source_root.join("link");
+        let destination = root.join("copied-link");
+        fs::create_dir_all(&target_dir).expect("create symlink target");
+        fs::write(target_dir.join("child.txt"), b"child").expect("target child");
+        symlink("target", &link).expect("create directory symlink");
+
+        let transfer_id = format!("android-symlink-test-{sequence}");
+        register_transfer(
+            transfer_id.clone(),
+            "symlink test".to_owned(),
+            "Copying".to_owned(),
+            BTreeSet::new(),
+            TransferJob::Local(crate::app::LocalFileCommand::CopyMove {
+                current: root.clone(),
+                source: link.clone(),
+                destination: destination.clone(),
+                cut: false,
+                replace: false,
+            }),
+        );
+        let (bytes_total, items_total) = super::measure_local_path(&link).expect("measure link");
+        let mut bytes_done = 0;
+        let mut items_done = 0;
+        let result = copy_local_path_controlled(
+            &transfer_id,
+            &link,
+            &destination,
+            &mut bytes_done,
+            &mut items_done,
+            bytes_total,
+            items_total,
+        );
+        finish_transfer(&transfer_id, result.as_ref().err().cloned());
+        result.expect("copy directory symlink");
+
+        assert!(
+            fs::symlink_metadata(&destination)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            fs::read_link(&destination).unwrap(),
+            std::path::PathBuf::from("target")
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn controlled_copy_preserves_supported_file_metadata() {
+        let sequence = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "fast-explorer-android-metadata-test-{}-{sequence}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).expect("create metadata test root");
+        let source = root.join("source.txt");
+        let destination = root.join("destination.txt");
+        fs::write(&source, b"metadata").expect("write metadata source");
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o640)).expect("set source mode");
+        let expected_modified = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        fs::File::open(&source)
+            .expect("open metadata source")
+            .set_times(std::fs::FileTimes::new().set_modified(expected_modified))
+            .expect("set source mtime");
+
+        let transfer_id = format!("android-metadata-test-{sequence}");
+        register_transfer(
+            transfer_id.clone(),
+            "metadata test".to_owned(),
+            "Copying".to_owned(),
+            BTreeSet::new(),
+            TransferJob::Local(crate::app::LocalFileCommand::CopyMove {
+                current: root.clone(),
+                source: source.clone(),
+                destination: destination.clone(),
+                cut: false,
+                replace: false,
+            }),
+        );
+        let (bytes_total, items_total) =
+            super::measure_local_path(&source).expect("measure source");
+        let mut bytes_done = 0;
+        let mut items_done = 0;
+        let result = copy_local_path_controlled(
+            &transfer_id,
+            &source,
+            &destination,
+            &mut bytes_done,
+            &mut items_done,
+            bytes_total,
+            items_total,
+        );
+        finish_transfer(&transfer_id, result.as_ref().err().cloned());
+        result.expect("copy metadata source");
+
+        let source_metadata = fs::metadata(&source).unwrap();
+        let destination_metadata = fs::metadata(&destination).unwrap();
+        assert_eq!(
+            destination_metadata.permissions().mode() & 0o777,
+            source_metadata.permissions().mode() & 0o777
+        );
+        assert_eq!(
+            destination_metadata.modified().unwrap(),
+            source_metadata.modified().unwrap()
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn metadata_timestamps_survive_restrictive_source_permissions() {
+        let sequence = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "fast-explorer-android-restrictive-metadata-test-{}-{sequence}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).expect("create restrictive metadata test root");
+        let source = root.join("source.txt");
+        let destination = root.join("destination.txt");
+        fs::write(&source, b"source").expect("write metadata source");
+        fs::write(&destination, b"destination").expect("write metadata destination");
+        let expected_modified = UNIX_EPOCH + Duration::from_secs(1_650_000_000);
+        fs::File::open(&source)
+            .expect("open metadata source")
+            .set_times(std::fs::FileTimes::new().set_modified(expected_modified))
+            .expect("set source mtime");
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o200))
+            .expect("set restrictive source mode");
+        let source_metadata = fs::metadata(&source).expect("source metadata");
+
+        super::apply_local_metadata(&source_metadata, &destination);
+
+        let destination_metadata = fs::metadata(&destination).expect("destination metadata");
+        assert_eq!(destination_metadata.permissions().mode() & 0o777, 0o200);
+        assert_eq!(destination_metadata.modified().unwrap(), expected_modified);
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o600)).ok();
+        fs::set_permissions(&destination, fs::Permissions::from_mode(0o600)).ok();
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn type_conflict_replace_removes_internal_backup() {
+        let sequence = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "fast-explorer-android-backup-test-{}-{sequence}",
+            std::process::id()
+        ));
+        let staging = root.join("staging-file");
+        let destination = root.join("destination");
+        fs::create_dir_all(destination.join("old-tree")).expect("create old destination");
+        fs::write(destination.join("old-tree/data.txt"), b"old").expect("old data");
+        fs::write(&staging, b"replacement").expect("staged replacement");
+
+        let transfer_id = format!("android-backup-test-{sequence}");
+        register_transfer(
+            transfer_id.clone(),
+            "backup test".to_owned(),
+            "Merging".to_owned(),
+            BTreeSet::new(),
+            TransferJob::Local(crate::app::LocalFileCommand::CopyMove {
+                current: root.clone(),
+                source: staging.clone(),
+                destination: destination.clone(),
+                cut: false,
+                replace: true,
+            }),
+        );
+        let result = merge_staging_entry_controlled(&transfer_id, &staging, &destination);
+        finish_transfer(&transfer_id, result.as_ref().err().cloned());
+        result.expect("replace directory with file");
+        assert_eq!(fs::read(&destination).unwrap(), b"replacement");
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let leftovers = loop {
+            let leftovers = fs::read_dir(&root)
+                .unwrap()
+                .filter_map(Result::ok)
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .filter(|name| name.starts_with(".fastexplorer-replace-backup-"))
+                .collect::<Vec<_>>();
+            if leftovers.is_empty() || std::time::Instant::now() >= deadline {
+                break leftovers;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert!(
+            leftovers.is_empty(),
+            "unexpected replace backups: {leftovers:?}"
+        );
+        fs::remove_dir_all(root).ok();
+    }
 }

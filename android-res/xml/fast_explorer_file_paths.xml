@@ -3,4 +3,5 @@
     <files-path name="remote_open" path="remote-open/" />
     <files-path name="aab_install" path="aab-install/" />
     <external-path name="shared_storage" path="." />
+    <root-path name="storage_volumes" path="storage/" />
 </paths>

@@ -6,16 +6,38 @@ if (file('google-services.json').exists()) {
     apply plugin: 'com.google.gms.google-services'
 }
 
+def userHome = System.getProperty('user.home')
+def xdgConfigHome = System.getenv('XDG_CONFIG_HOME') ?: "${userHome}/.config"
+def explicitDebugKeystore = System.getenv('ANDROID_DEBUG_KEYSTORE')
+def legacyDebugKeystore = file("${userHome}/.android/debug.keystore")
+def xdgDebugKeystore = file("${xdgConfigHome}/.android/debug.keystore")
+def sharedDebugKeystore = explicitDebugKeystore
+        ? file(explicitDebugKeystore)
+        : (legacyDebugKeystore.exists()
+                ? legacyDebugKeystore
+                : (xdgDebugKeystore.exists() ? xdgDebugKeystore : null))
+
 android {
     namespace 'dev.oligami.fastexplorer'
     compileSdk 35
+
+    signingConfigs {
+        debug {
+            if (sharedDebugKeystore != null) {
+                storeFile sharedDebugKeystore
+                storePassword 'android'
+                keyAlias 'androiddebugkey'
+                keyPassword 'android'
+            }
+        }
+    }
 
     defaultConfig {
         applicationId 'dev.oligami.fastexplorer'
         minSdk 30
         targetSdk 35
-        versionCode 20000004
-        versionName '0.1.4'
+        versionCode 20000005
+        versionName '0.1.5'
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
     }
 

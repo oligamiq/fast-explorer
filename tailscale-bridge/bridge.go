@@ -1390,6 +1390,34 @@ func FE_TS_TaildriveDownload(profileID, deviceID, share, remotePath, destination
 	return 1
 }
 
+//export FE_TS_TaildriveDownloadToFD
+func FE_TS_TaildriveDownloadToFD(profileID, deviceID, share, remotePath *C.char, destinationFD C.int) C.int {
+	profile, err := goString(profileID, "Tailscale profile ID")
+	if err != nil {
+		return 0
+	}
+	device, err := goString(deviceID, "Taildrive device ID")
+	if err == nil {
+		var shareName, path string
+		shareName, err = goString(share, "Taildrive share")
+		if err == nil {
+			path, err = goString(remotePath, "Taildrive path")
+		}
+		if err == nil {
+			err = taildriveDownloadToFD(profile, device, shareName, path, int(destinationFD))
+		}
+	}
+	if bridge, _ := profileFor(profile, false); bridge != nil {
+		bridge.setLastError(err)
+	} else {
+		setDetachedError(profile, err)
+	}
+	if err != nil {
+		return 0
+	}
+	return 1
+}
+
 //export FE_TS_TaildriveUpload
 func FE_TS_TaildriveUpload(profileID, deviceID, share, remotePath, source *C.char) C.int {
 	profile, err := goString(profileID, "Tailscale profile ID")

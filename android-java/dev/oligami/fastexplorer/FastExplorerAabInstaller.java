@@ -16,6 +16,7 @@ import java.security.PrivateKey;
 import java.security.cert.X509Certificate;
 import java.util.Calendar;
 import java.util.Enumeration;
+import java.util.Locale;
 import java.util.UUID;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
@@ -31,6 +32,7 @@ final class FastExplorerAabInstaller {
         if (!outputDir.exists() && !outputDir.mkdirs()) {
             throw new IllegalStateException("Cannot create AAB installer cache");
         }
+        cleanupStaleChildren(outputDir);
         String token = UUID.randomUUID().toString();
         File apkSet = new File(outputDir, token + ".apks");
         File universalApk = new File(outputDir, token + ".apk");
@@ -70,6 +72,21 @@ final class FastExplorerAabInstaller {
     private static void deleteTemporaryFile(File file) {
         if (file.exists() && !file.delete()) {
             android.util.Log.w("FastExplorer", "Cannot delete temporary AAB install file: " + file);
+        }
+    }
+
+    static void cleanupStaleArtifacts(Context context) {
+        cleanupStaleChildren(new File(context.getFilesDir(), "aab-install"));
+    }
+
+    private static void cleanupStaleChildren(File root) {
+        File[] children = root.listFiles();
+        if (children == null) return;
+        long cutoff = System.currentTimeMillis() - 24L * 60L * 60L * 1000L;
+        for (File child : children) {
+            if (child.lastModified() < cutoff) {
+                deleteTemporaryFile(child);
+            }
         }
     }
 
@@ -119,7 +136,7 @@ final class FastExplorerAabInstaller {
                 while (entries.hasMoreElements()) {
                     ZipEntry candidate = entries.nextElement();
                     if (!candidate.isDirectory()
-                            && candidate.getName().toLowerCase().endsWith("/universal.apk")) {
+                            && candidate.getName().toLowerCase(Locale.ROOT).endsWith("/universal.apk")) {
                         universal = candidate;
                         break;
                     }

@@ -42,6 +42,27 @@ done
 [[ -d "$NDK" ]] || { echo "Missing Android NDK $NDK_VERSION" >&2; exit 1; }
 [[ -x "$GRADLE_ROOT/gradlew" ]] || { echo "Missing Gradle wrapper" >&2; exit 1; }
 
+KEYSTORE="${ANDROID_DEBUG_KEYSTORE:-}"
+if [[ -z "$KEYSTORE" ]]; then
+  LEGACY_KEYSTORE="$HOME/.android/debug.keystore"
+  XDG_KEYSTORE="${XDG_CONFIG_HOME:-$HOME/.config}/.android/debug.keystore"
+  if [[ -f "$LEGACY_KEYSTORE" ]]; then
+    KEYSTORE="$LEGACY_KEYSTORE"
+  elif [[ -f "$XDG_KEYSTORE" ]]; then
+    KEYSTORE="$XDG_KEYSTORE"
+  else
+    KEYSTORE="$LEGACY_KEYSTORE"
+  fi
+fi
+if [[ ! -f "$KEYSTORE" ]]; then
+  command -v keytool >/dev/null || { echo "Missing keytool for Android debug key" >&2; exit 1; }
+  mkdir -p "$(dirname "$KEYSTORE")"
+  keytool -genkeypair -noprompt -keystore "$KEYSTORE" \
+    -storepass android -keypass android -alias androiddebugkey \
+    -dname "CN=Android Debug,O=Android,C=US" -keyalg RSA -keysize 2048 -validity 10000 >/dev/null
+fi
+export ANDROID_DEBUG_KEYSTORE="$KEYSTORE"
+
 mkdir -p "$APP_TARGET" "$JNI_ROOT/$JNI_ABI" "$(dirname "$TSNET_ARTIFACT")" "$DIST"
 export FASTEXPLORER_TSNET_ARTIFACT="$TSNET_ARTIFACT"
 export ANDROID_HOME="$SDK"
@@ -91,8 +112,6 @@ ALIGNED="$TMP/fast-explorer-aligned.apk"
 "$BUILD_TOOLS/zipalign" -f -P 16 4 "$GRADLE_APK" "$ALIGNED"
 
 OUTPUT="$DIST/fast-explorer-${ABI_NAME}-debug.apk"
-KEYSTORE="${ANDROID_DEBUG_KEYSTORE:-$HOME/.android/debug.keystore}"
-[[ -f "$KEYSTORE" ]] || { echo "Android debug keystore not found: $KEYSTORE" >&2; exit 1; }
 "$BUILD_TOOLS/apksigner" sign \
   --ks "$KEYSTORE" --ks-key-alias androiddebugkey \
   --ks-pass pass:android --key-pass pass:android \

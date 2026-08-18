@@ -21,8 +21,12 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 final class FastExplorerApksInstaller {
+    private static final ExecutorService CLEANUP_EXECUTOR = Executors.newSingleThreadExecutor();
+
     private FastExplorerApksInstaller() {}
 
     static final class PreparedInstall {
@@ -36,16 +40,7 @@ final class FastExplorerApksInstaller {
     }
 
     static PreparedInstall prepare(Context context, File archive) throws Exception {
-        File root = new File(context.getFilesDir(), "apks-install");
-        if (!root.exists() && !root.mkdirs()) {
-            throw new IllegalStateException("Cannot create APKS installer cache");
-        }
-        cleanupStaleChildren(root);
-
-        File workingDirectory = new File(root, UUID.randomUUID().toString());
-        if (!workingDirectory.mkdirs()) {
-            throw new IllegalStateException("Cannot create APKS working directory");
-        }
+        File workingDirectory = createWorkingDirectory(context);
         boolean complete = false;
         try {
             List<Path> extracted = ExtractApksCommand.builder()
@@ -67,6 +62,28 @@ final class FastExplorerApksInstaller {
         }
     }
 
+    static PreparedInstall prepareSingleApk(Context context, File apk) throws Exception {
+        File canonical = apk.getCanonicalFile();
+        if (!canonical.isFile() || canonical.length() == 0) {
+            throw new IllegalArgumentException("Selected APK is empty or unavailable");
+        }
+        File workingDirectory = createWorkingDirectory(context);
+        return new PreparedInstall(workingDirectory, List.of(canonical.toPath()));
+    }
+
+    private static File createWorkingDirectory(Context context) throws Exception {
+        File root = new File(context.getFilesDir(), "apks-install");
+        if (!root.exists() && !root.mkdirs()) {
+            throw new IllegalStateException("Cannot create package installer cache");
+        }
+        cleanupStaleChildren(root);
+        File workingDirectory = new File(root, UUID.randomUUID().toString());
+        if (!workingDirectory.mkdirs()) {
+            throw new IllegalStateException("Cannot create package installer working directory");
+        }
+        return workingDirectory;
+    }
+
     static int commit(Context context, PreparedInstall prepared, IntentSender statusReceiver)
             throws Exception {
         PackageInstaller installer = context.getPackageManager().getPackageInstaller();
@@ -78,6 +95,12 @@ final class FastExplorerApksInstaller {
             totalBytes += path.toFile().length();
         }
         params.setSize(totalBytes);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            // Tell Android this is a user-selected local file, not an app-store or
+            // background downloader install. This is the package source intended for
+            // file managers facilitating an APK installation.
+            params.setPackageSource(PackageInstaller.PACKAGE_SOURCE_LOCAL_FILE);
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             params.setRequireUserAction(PackageInstaller.SessionParams.USER_ACTION_REQUIRED);
         }
@@ -170,16 +193,29 @@ final class FastExplorerApksInstaller {
     }
 
     static void deleteRecursively(File path) {
-        File[] children = path.listFiles();
-        if (children != null) {
-            for (File child : children) {
-                deleteRecursively(child);
+        if (!java.nio.file.Files.isSymbolicLink(path.toPath())) {
+            File[] children = path.listFiles();
+            if (children != null) {
+                for (File child : children) {
+                    deleteRecursively(child);
+                }
             }
         }
-        if (path.exists() && !path.delete()) {
-            android.util.Log.w("FastExplorer", "Cannot delete APKS installer file: " + path);
+        try {
+            java.nio.file.Files.deleteIfExists(path.toPath());
+        } catch (java.io.IOException error) {
+            android.util.Log.w("FastExplorer", "Cannot delete APKS installer file: " + path, error);
         }
     }
+
+    static void deleteRecursivelyAsync(File path) {
+        try {
+            CLEANUP_EXECUTOR.execute(() -> deleteRecursively(path));
+        } catch (RuntimeException error) {
+            android.util.Log.w("FastExplorer", "Cannot schedule installer cleanup", error);
+        }
+    }
+
     static boolean isWorkingDirectory(Context context, String absolutePath) {
         if (absolutePath == null || absolutePath.isEmpty()) {
             return false;
@@ -202,6 +238,29 @@ final class FastExplorerApksInstaller {
             deleteRecursively(new File(absolutePath).getCanonicalFile());
         } catch (Exception error) {
             android.util.Log.w("FastExplorer", "Cannot clean APKS working directory", error);
+        }
+    }
+
+    static void cleanupWorkingDirectoryAsync(Context context, String absolutePath) {
+        Context appContext = context.getApplicationContext();
+        try {
+            CLEANUP_EXECUTOR.execute(() -> cleanupWorkingDirectory(appContext, absolutePath));
+        } catch (RuntimeException error) {
+            android.util.Log.w("FastExplorer", "Cannot schedule APKS working-directory cleanup", error);
+        }
+    }
+
+    static void cleanupStaleArtifacts(Context context) {
+        cleanupStaleChildren(new File(context.getFilesDir(), "apks-install"));
+        FastExplorerAabInstaller.cleanupStaleArtifacts(context);
+    }
+
+    static void cleanupStaleArtifactsAsync(Context context) {
+        Context appContext = context.getApplicationContext();
+        try {
+            CLEANUP_EXECUTOR.execute(() -> cleanupStaleArtifacts(appContext));
+        } catch (RuntimeException error) {
+            android.util.Log.w("FastExplorer", "Cannot schedule installer cache cleanup", error);
         }
     }
 

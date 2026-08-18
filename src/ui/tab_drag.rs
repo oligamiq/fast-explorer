@@ -7,8 +7,8 @@ use xilem::masonry::core::{
     PointerUpdate, Properties, PropertiesMut, PropertiesRef, RegisterCtx, StyleProperty, TextEvent,
     Update, UpdateCtx, Widget, WidgetId, WidgetMut, WidgetPod,
 };
-use xilem::masonry::kurbo::{Affine, Point, Rect, Size, Stroke, Vec2};
-use xilem::masonry::peniko::Color;
+use xilem::masonry::kurbo::{Affine, Point, Rect, RoundedRect, Size, Stroke, Vec2};
+use xilem::masonry::peniko::{Color, Fill};
 use xilem::masonry::properties::types::AsUnit;
 use xilem::masonry::properties::{
     Background, BorderColor, BorderWidth, ContentColor, CornerRadius,
@@ -18,6 +18,7 @@ use xilem::masonry::widgets::{Flex, Label, SizedBox};
 use xilem::{Pod, ViewCtx, WidgetView};
 
 use crate::app::{AppState, TabStripDragPreviewHandle};
+use crate::theme::Layout;
 
 const TAB_CONTENT_VIEW_ID: ViewId = ViewId::new(0);
 const GROUP_CONTENT_VIEW_ID: ViewId = ViewId::new(1);
@@ -33,6 +34,54 @@ const GROUP_DROP_ENTER_INSET_PX: f64 = 4.0;
 const HIDDEN_DRAG_CHILD_X: f64 = -100_000.0;
 const PREVIEW_EASE_RATE: f64 = 24.0;
 const PREVIEW_SNAP_DISTANCE: f64 = 0.2;
+const TAB_STATE_EASE_RATE: f64 = 18.0;
+const TAB_STATE_SNAP_DISTANCE: f64 = 0.01;
+const TAB_APPEAR_OFFSET_PX: f64 = 8.0;
+
+fn tab_layout_transition_offset(
+    old_ids: &[u64],
+    old_centers: &[f64],
+    new_ids: &[u64],
+    new_centers: &[f64],
+    tab_id: u64,
+    identity_changed: bool,
+) -> Option<f64> {
+    let old_index = old_ids.iter().position(|id| *id == tab_id);
+    let new_index = new_ids.iter().position(|id| *id == tab_id);
+    match (old_index, new_index) {
+        (Some(old_index), Some(new_index)) => old_centers
+            .get(old_index)
+            .zip(new_centers.get(new_index))
+            .map(|(old_center, new_center)| old_center - new_center),
+        (None, Some(_)) if identity_changed => Some(-TAB_APPEAR_OFFSET_PX),
+        _ => None,
+    }
+}
+
+fn compose_layout_transition_offset(
+    current_offset: f64,
+    transition_offset: f64,
+    identity_changed: bool,
+) -> f64 {
+    if identity_changed {
+        transition_offset
+    } else {
+        current_offset + transition_offset
+    }
+}
+
+fn eased_unit_progress(current: f64, target: f64, interval_ns: u64) -> f64 {
+    if (target - current).abs() <= TAB_STATE_SNAP_DISTANCE {
+        return target;
+    }
+    let dt = if interval_ns == 0 {
+        1.0 / 60.0
+    } else {
+        (interval_ns as f64 / 1_000_000_000.0).min(0.05)
+    };
+    let alpha = 1.0 - (-TAB_STATE_EASE_RATE * dt).exp();
+    current + (target - current) * alpha
+}
 
 fn eased_preview_offset(current: f64, target: f64, interval_ns: u64, direct: bool) -> f64 {
     if direct || (target - current).abs() <= PREVIEW_SNAP_DISTANCE {
@@ -573,8 +622,10 @@ pub(super) struct TabDragConfig {
     pub drag_handle_right_inset: f64,
     pub accessibility_label: String,
     pub selected: bool,
-    pub background: Color,
-    pub border: Color,
+    pub inactive_background: Color,
+    pub active_background: Color,
+    pub inactive_border: Color,
+    pub active_border: Color,
     pub ungrouped_border: Color,
     pub new_group_borders: Vec<Color>,
     pub armed_border: Color,
@@ -679,6 +730,10 @@ pub(super) struct TabDragWidget {
     drag_origin_window: Point,
     drag_offset_x: f64,
     preview_offset_x: f64,
+    layout_offset_x: f64,
+    selection_progress: f64,
+    hover_progress: f64,
+    hover_target: f64,
     preview_announced: bool,
     layer_root_id: Option<WidgetId>,
     candidate_layer_root_id: Option<WidgetId>,
@@ -700,6 +755,7 @@ pub(super) struct TabDragWidget {
 
 impl TabDragWidget {
     fn new(child: NewWidget<impl Widget + ?Sized>, config: TabDragConfig) -> Self {
+        let selection_progress = if config.selected { 1.0 } else { 0.0 };
         Self {
             child: child.erased().to_pod(),
             config,
@@ -710,6 +766,10 @@ impl TabDragWidget {
             drag_origin_window: Point::ORIGIN,
             drag_offset_x: 0.0,
             preview_offset_x: 0.0,
+            layout_offset_x: 0.0,
+            selection_progress,
+            hover_progress: 0.0,
+            hover_target: 0.0,
             preview_announced: false,
             layer_root_id: None,
             candidate_layer_root_id: None,
@@ -736,8 +796,22 @@ impl TabDragWidget {
 
     fn set_config(this: &mut WidgetMut<'_, Self>, config: TabDragConfig) {
         if this.widget.config != config {
-            let identity_changed = this.widget.config.tab_id != config.tab_id;
-            let preview_changed = this.widget.config.preview_active != config.preview_active;
+            let old_config = &this.widget.config;
+            let identity_changed = old_config.tab_id != config.tab_id;
+            let preview_changed = old_config.preview_active != config.preview_active;
+            let selection_changed = old_config.selected != config.selected;
+            let layout_offset = if !old_config.preview_active && !config.preview_active {
+                tab_layout_transition_offset(
+                    &old_config.tab_ids,
+                    &old_config.tab_centers,
+                    &config.tab_ids,
+                    &config.tab_centers,
+                    config.tab_id,
+                    identity_changed,
+                )
+            } else {
+                None
+            };
             let should_reveal = config.selected
                 && (!this.widget.config.selected
                     || this.widget.config.source_index != config.source_index
@@ -748,14 +822,38 @@ impl TabDragWidget {
                     || (this.widget.config.scroll_leading - config.scroll_leading).abs()
                         > f64::EPSILON);
             this.widget.config = config;
+            if let Some(offset) =
+                layout_offset.filter(|offset| offset.abs() > PREVIEW_SNAP_DISTANCE)
+            {
+                // The layout has already committed its new geometry. Preserve the
+                // current visual center across consecutive structural changes by
+                // composing the new layout delta with any in-flight easing offset.
+                // A recycled slot representing a different tab must not inherit the
+                // previous tab's transient translation.
+                this.widget.layout_offset_x = compose_layout_transition_offset(
+                    this.widget.layout_offset_x,
+                    offset,
+                    identity_changed,
+                );
+            } else if preview_changed || identity_changed {
+                this.widget.layout_offset_x = 0.0;
+            }
             if identity_changed || (preview_changed && !this.widget.config.preview_active) {
                 // Vec-based Xilem children are rebuilt in visual slot order. After a
                 // committed reorder a wrapper may now represent a different tab, so
-                // never carry the previous tab's transient translation into it. Also
-                // snap to the real layout when preview mode ends; on a successful drop
-                // that layout is already the prospective position, avoiding a double
-                // translation/jump during the commit rebuild.
+                // never carry the previous tab's transient drag translation into it.
+                // The separate layout offset above is only retained for non-drag
+                // structural changes such as closing a tab or toggling a group.
                 this.widget.preview_offset_x = 0.0;
+                if identity_changed {
+                    this.widget.selection_progress = if this.widget.config.selected {
+                        1.0
+                    } else {
+                        0.0
+                    };
+                    this.widget.hover_progress = 0.0;
+                    this.widget.hover_target = 0.0;
+                }
                 if let Some(layer_id) = this.widget.candidate_layer_root_id.take() {
                     this.ctx.remove_layer(layer_id);
                 }
@@ -770,14 +868,30 @@ impl TabDragWidget {
                 ));
             }
             if preview_changed
+                || selection_changed
                 || this.widget.config.preview_active
                 || this.widget.preview_offset_x != 0.0
+                || this.widget.layout_offset_x.abs() > PREVIEW_SNAP_DISTANCE
             {
                 this.ctx.request_anim_frame();
             }
             this.ctx.request_render();
             this.ctx.request_compose();
         }
+    }
+
+    fn animated_background(&self) -> Color {
+        self.config.inactive_background.lerp_rect(
+            self.config.active_background,
+            self.selection_progress.clamp(0.0, 1.0) as f32,
+        )
+    }
+
+    fn animated_border(&self) -> Color {
+        self.config.inactive_border.lerp_rect(
+            self.config.active_border,
+            self.selection_progress.clamp(0.0, 1.0) as f32,
+        )
     }
 
     fn dragged_center(&self) -> f64 {
@@ -1045,7 +1159,7 @@ impl Widget for TabDragWidget {
                                 ctx.size().width,
                                 ctx.size().height,
                                 self.config.drag_handle_right_inset,
-                                self.config.background,
+                                self.animated_background(),
                                 preview_border,
                                 self.config.text_color,
                             );
@@ -1092,7 +1206,7 @@ impl Widget for TabDragWidget {
                             ctx.size().width,
                             ctx.size().height,
                             self.config.drag_handle_right_inset,
-                            self.config.background,
+                            self.animated_background(),
                             preview_border,
                             self.config.text_color,
                         );
@@ -1126,7 +1240,7 @@ impl Widget for TabDragWidget {
                         ctx.size().width,
                         ctx.size().height,
                         self.config.drag_handle_right_inset,
-                        self.config.background,
+                        self.animated_background(),
                         preview_border,
                         self.config.text_color,
                     );
@@ -1279,6 +1393,26 @@ impl Widget for TabDragWidget {
     ) {
         let mut needs_next_frame = false;
 
+        let selection_target = if self.config.selected { 1.0 } else { 0.0 };
+        let next_selection =
+            eased_unit_progress(self.selection_progress, selection_target, interval);
+        if (next_selection - self.selection_progress).abs() > f64::EPSILON {
+            self.selection_progress = next_selection;
+            ctx.request_render();
+        }
+        if (selection_target - self.selection_progress).abs() > TAB_STATE_SNAP_DISTANCE {
+            needs_next_frame = true;
+        }
+
+        let next_hover = eased_unit_progress(self.hover_progress, self.hover_target, interval);
+        if (next_hover - self.hover_progress).abs() > f64::EPSILON {
+            self.hover_progress = next_hover;
+            ctx.request_render();
+        }
+        if (self.hover_target - self.hover_progress).abs() > TAB_STATE_SNAP_DISTANCE {
+            needs_next_frame = true;
+        }
+
         if self.pending_touch
             && !self.touch_drag_armed
             && !self.touch_hold_cancelled
@@ -1303,7 +1437,7 @@ impl Widget for TabDragWidget {
                         ctx.size().width,
                         ctx.size().height,
                         self.config.drag_handle_right_inset,
-                        self.config.background,
+                        self.animated_background(),
                         preview_border,
                         self.config.text_color,
                     );
@@ -1338,7 +1472,7 @@ impl Widget for TabDragWidget {
                         ctx.size().width,
                         ctx.size().height,
                         self.config.drag_handle_right_inset,
-                        self.config.background,
+                        self.animated_background(),
                         preview_border,
                         self.config.text_color,
                     );
@@ -1370,6 +1504,17 @@ impl Widget for TabDragWidget {
         {
             needs_next_frame = true;
         }
+
+        let next_layout = eased_preview_offset(self.layout_offset_x, 0.0, interval, false);
+        if (next_layout - self.layout_offset_x).abs() > f64::EPSILON {
+            self.layout_offset_x = next_layout;
+            ctx.request_compose();
+            ctx.request_render();
+        }
+        if self.layout_offset_x.abs() > PREVIEW_SNAP_DISTANCE {
+            needs_next_frame = true;
+        }
+
         let is_candidate_target = self.config.preview_active
             && self.config.preview_handle.group_candidate_slot() == Some(self.config.slot_index)
             && self.drag_tab_id.is_none();
@@ -1409,11 +1554,13 @@ impl Widget for TabDragWidget {
                 .copied()
                 .unwrap_or_else(|| ctx.size().width.max(1.0));
             ctx.request_scroll_to(Rect::new(-self.config.scroll_leading, 0.0, width, 1.0));
+            ctx.request_anim_frame();
         }
-        if matches!(
-            event,
-            Update::HoveredChanged(_) | Update::ActiveChanged(_) | Update::FocusChanged(_)
-        ) {
+        if let Update::HoveredChanged(hovered) = event {
+            self.hover_target = if *hovered { 1.0 } else { 0.0 };
+            ctx.request_anim_frame();
+        }
+        if matches!(event, Update::ActiveChanged(_) | Update::FocusChanged(_)) {
             ctx.request_paint_only();
         }
     }
@@ -1436,17 +1583,73 @@ impl Widget for TabDragWidget {
         let translation = if self.layer_root_id.is_some() {
             Vec2::new(HIDDEN_DRAG_CHILD_X, 0.0)
         } else {
-            Vec2::new(self.preview_offset_x, 0.0)
+            Vec2::new(self.preview_offset_x + self.layout_offset_x, 0.0)
         };
         ctx.set_child_scroll_translation(&mut self.child, translation);
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx<'_>, _props: &PropertiesRef<'_>, scene: &mut Scene) {
+        let paint_transform =
+            Affine::translate(Vec2::new(self.preview_offset_x + self.layout_offset_x, 0.0));
+        if self.layer_root_id.is_none() {
+            let rect = ctx.size().to_rect().inset(0.5);
+            let rounded = RoundedRect::from_rect(rect, Layout::RADIUS);
+            scene.fill(
+                Fill::NonZero,
+                paint_transform,
+                self.animated_background(),
+                None,
+                &rounded,
+            );
+            if self.hover_progress > TAB_STATE_SNAP_DISTANCE {
+                scene.fill(
+                    Fill::NonZero,
+                    paint_transform,
+                    self.config
+                        .armed_border
+                        .multiply_alpha((0.055 * self.hover_progress) as f32),
+                    None,
+                    &rounded,
+                );
+            }
+            scene.stroke(
+                &Stroke::new(1.0),
+                paint_transform,
+                self.animated_border(),
+                None,
+                &rounded,
+            );
+
+            if self.selection_progress > TAB_STATE_SNAP_DISTANCE {
+                let max_width = (rect.width() - 14.0).max(0.0);
+                let width = max_width * self.selection_progress;
+                if width > 0.0 {
+                    let center = rect.center().x;
+                    let indicator = Rect::new(
+                        center - width * 0.5,
+                        rect.y1 - 2.0,
+                        center + width * 0.5,
+                        rect.y1,
+                    )
+                    .to_rounded_rect(1.0);
+                    scene.fill(
+                        Fill::NonZero,
+                        paint_transform,
+                        self.config
+                            .armed_border
+                            .multiply_alpha(self.selection_progress as f32),
+                        None,
+                        &indicator,
+                    );
+                }
+            }
+        }
+
         if ctx.is_focus_target() {
             let rect = ctx.size().to_rect().inset(2.0);
             scene.stroke(
                 &Stroke::new(1.5),
-                Affine::IDENTITY,
+                paint_transform,
                 self.config.armed_border,
                 None,
                 &rect,
@@ -1637,6 +1840,9 @@ pub(super) struct GroupDragWidget {
     origin_window: Point,
     offset_x: f64,
     preview_offset_x: f64,
+    collapse_progress: f64,
+    hover_progress: f64,
+    hover_target: f64,
     preview_announced: bool,
     dragging: bool,
     layer_root_id: Option<WidgetId>,
@@ -1651,6 +1857,7 @@ pub(super) struct GroupDragWidget {
 
 impl GroupDragWidget {
     fn new(child: NewWidget<impl Widget + ?Sized>, config: GroupDragConfig) -> Self {
+        let collapse_progress = if config.collapsed { 1.0 } else { 0.0 };
         Self {
             child: child.erased().to_pod(),
             config,
@@ -1660,6 +1867,9 @@ impl GroupDragWidget {
             origin_window: Point::ORIGIN,
             offset_x: 0.0,
             preview_offset_x: 0.0,
+            collapse_progress,
+            hover_progress: 0.0,
+            hover_target: 0.0,
             preview_announced: false,
             dragging: false,
             layer_root_id: None,
@@ -1681,11 +1891,22 @@ impl GroupDragWidget {
         if this.widget.config != config {
             let identity_changed = this.widget.config.group_id != config.group_id;
             let preview_changed = this.widget.config.preview_active != config.preview_active;
+            let collapsed_changed = this.widget.config.collapsed != config.collapsed;
             this.widget.config = config;
             if identity_changed || (preview_changed && !this.widget.config.preview_active) {
                 this.widget.preview_offset_x = 0.0;
             }
+            if identity_changed {
+                this.widget.collapse_progress = if this.widget.config.collapsed {
+                    1.0
+                } else {
+                    0.0
+                };
+                this.widget.hover_progress = 0.0;
+                this.widget.hover_target = 0.0;
+            }
             if preview_changed
+                || collapsed_changed
                 || this.widget.config.preview_active
                 || this.widget.preview_offset_x != 0.0
             {
@@ -1998,6 +2219,25 @@ impl Widget for GroupDragWidget {
     ) {
         let mut needs_next_frame = false;
 
+        let collapse_target = if self.config.collapsed { 1.0 } else { 0.0 };
+        let next_collapse = eased_unit_progress(self.collapse_progress, collapse_target, interval);
+        if (next_collapse - self.collapse_progress).abs() > f64::EPSILON {
+            self.collapse_progress = next_collapse;
+            ctx.request_render();
+        }
+        if (collapse_target - self.collapse_progress).abs() > TAB_STATE_SNAP_DISTANCE {
+            needs_next_frame = true;
+        }
+
+        let next_hover = eased_unit_progress(self.hover_progress, self.hover_target, interval);
+        if (next_hover - self.hover_progress).abs() > f64::EPSILON {
+            self.hover_progress = next_hover;
+            ctx.request_render();
+        }
+        if (self.hover_target - self.hover_progress).abs() > TAB_STATE_SNAP_DISTANCE {
+            needs_next_frame = true;
+        }
+
         if self.pending_touch
             && !self.touch_drag_armed
             && !self.touch_context_armed
@@ -2066,10 +2306,11 @@ impl Widget for GroupDragWidget {
     }
 
     fn update(&mut self, ctx: &mut UpdateCtx<'_>, _props: &mut PropertiesMut<'_>, event: &Update) {
-        if matches!(
-            event,
-            Update::HoveredChanged(_) | Update::ActiveChanged(_) | Update::FocusChanged(_)
-        ) {
+        if let Update::HoveredChanged(hovered) = event {
+            self.hover_target = if *hovered { 1.0 } else { 0.0 };
+            ctx.request_anim_frame();
+        }
+        if matches!(event, Update::ActiveChanged(_) | Update::FocusChanged(_)) {
             ctx.request_paint_only();
         }
     }
@@ -2095,11 +2336,40 @@ impl Widget for GroupDragWidget {
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx<'_>, _props: &PropertiesRef<'_>, scene: &mut Scene) {
+        let transform = Affine::translate(Vec2::new(self.preview_offset_x, 0.0));
+        if self.layer_root_id.is_none() {
+            let rect = ctx.size().to_rect().inset(0.5);
+            let rounded = RoundedRect::from_rect(rect, Layout::RADIUS);
+            let collapsed_tint = self.config.background.lerp_rect(self.config.border, 0.07);
+            let background = self.config.background.lerp_rect(
+                collapsed_tint,
+                self.collapse_progress.clamp(0.0, 1.0) as f32,
+            );
+            scene.fill(Fill::NonZero, transform, background, None, &rounded);
+            if self.hover_progress > TAB_STATE_SNAP_DISTANCE {
+                scene.fill(
+                    Fill::NonZero,
+                    transform,
+                    self.config
+                        .border
+                        .multiply_alpha((0.045 * self.hover_progress) as f32),
+                    None,
+                    &rounded,
+                );
+            }
+            scene.stroke(
+                &Stroke::new(1.0),
+                transform,
+                self.config.border,
+                None,
+                &rounded,
+            );
+        }
         if ctx.is_focus_target() {
             let rect = ctx.size().to_rect().inset(2.0);
             scene.stroke(
                 &Stroke::new(1.5),
-                Affine::IDENTITY,
+                transform,
                 self.config.text_color,
                 None,
                 &rect,
@@ -2143,8 +2413,9 @@ impl Widget for GroupDragWidget {
 mod tests {
     use super::{
         GroupLongPressIntent, TOUCH_DRAG_HOLD_NS, TabDropGroupSpan, TabGroupCandidateGeometry,
-        eased_preview_offset, group_long_press_intent, group_preview_targets, tab_drag_drop_border,
-        tab_drop_group_with_hysteresis, tab_drop_target_index, tab_group_candidate,
+        compose_layout_transition_offset, eased_preview_offset, group_long_press_intent,
+        group_preview_targets, tab_drag_drop_border, tab_drop_group_with_hysteresis,
+        tab_drop_target_index, tab_group_candidate, tab_layout_transition_offset,
         tab_preview_targets, touch_hold_elapsed, touch_hold_stable,
     };
     use xilem::masonry::kurbo::Point;
@@ -2171,6 +2442,44 @@ mod tests {
             group_long_press_intent(false),
             GroupLongPressIntent::ContextMenu
         );
+    }
+
+    #[test]
+    fn closing_a_tab_keeps_survivors_at_their_previous_visual_centers() {
+        let old_ids = [1, 2, 3, 4];
+        let old_centers = [50.0, 150.0, 250.0, 350.0];
+        let new_ids = [1, 3, 4];
+        let new_centers = [50.0, 150.0, 250.0];
+        assert_eq!(
+            tab_layout_transition_offset(&old_ids, &old_centers, &new_ids, &new_centers, 3, true,),
+            Some(100.0)
+        );
+        assert_eq!(
+            tab_layout_transition_offset(&old_ids, &old_centers, &new_ids, &new_centers, 4, true,),
+            Some(100.0)
+        );
+    }
+
+    #[test]
+    fn newly_visible_group_member_gets_only_a_small_entrance_offset() {
+        let old_ids = [1, 4];
+        let old_centers = [50.0, 150.0];
+        let new_ids = [1, 2, 3, 4];
+        let new_centers = [50.0, 150.0, 250.0, 350.0];
+        assert_eq!(
+            tab_layout_transition_offset(&old_ids, &old_centers, &new_ids, &new_centers, 2, true,),
+            Some(-8.0)
+        );
+    }
+
+    #[test]
+    fn consecutive_layout_transitions_preserve_the_current_visual_center() {
+        assert_eq!(compose_layout_transition_offset(50.0, 100.0, false), 150.0);
+    }
+
+    #[test]
+    fn recycled_tab_slot_does_not_inherit_the_previous_tabs_offset() {
+        assert_eq!(compose_layout_transition_offset(50.0, -8.0, true), -8.0);
     }
 
     #[test]

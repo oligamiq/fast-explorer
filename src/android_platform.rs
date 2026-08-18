@@ -724,6 +724,7 @@ fn documents_provider_call(operation: &str, payload: &str) -> String {
             "status" => documents_provider_status(&args),
             "list" => documents_provider_list(&args),
             "download" => documents_provider_download(&args),
+            "download_fd" => documents_provider_download_fd(&args),
             "upload" => documents_provider_upload(&args),
             "mkdir" => documents_provider_mkdir(&args),
             "delete" => documents_provider_delete(&args),
@@ -778,13 +779,19 @@ fn documents_provider_init(args: &serde_json::Value) -> Result<serde_json::Value
 }
 
 fn documents_provider_profiles() -> Result<serde_json::Value, String> {
+    let files_dir = DOCUMENTS_FILES_DIR
+        .get()
+        .ok_or_else(|| "DocumentsProvider is not initialized".to_owned())?;
     let share_root = DOCUMENTS_SHARE_ROOT
         .get()
         .ok_or_else(|| "DocumentsProvider is not initialized".to_owned())?;
-    let config = share_root.join(".config/fast-explorer/config.json");
+    let private_config = files_dir.join("state/config.json");
+    let legacy_config = share_root.join(".config/fast-explorer/config.json");
     let mut profiles = BTreeMap::<String, String>::new();
     let mut loaded_config = false;
-    if let Ok(text) = std::fs::read_to_string(&config)
+    let config_text = std::fs::read_to_string(&private_config)
+        .or_else(|_| std::fs::read_to_string(&legacy_config));
+    if let Ok(text) = config_text
         && let Ok(settings) = serde_json::from_str::<crate::settings::AppSettings>(&text)
     {
         loaded_config = true;
@@ -948,6 +955,20 @@ fn documents_provider_download(args: &serde_json::Value) -> Result<serde_json::V
     let destination = PathBuf::from(provider_arg(args, "destination")?);
     documents_provider_ensure_share(profile, device, share)?;
     crate::tailscale::taildrive_download(profile, device, share, path, &destination, "")?;
+    Ok(serde_json::json!({}))
+}
+
+fn documents_provider_download_fd(args: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let (profile, device, share) = documents_provider_remote_args(args)?;
+    let path = provider_arg(args, "path")?;
+    let fd = args
+        .get("fd")
+        .and_then(serde_json::Value::as_i64)
+        .and_then(|value| i32::try_from(value).ok())
+        .filter(|value| *value >= 0)
+        .ok_or_else(|| "missing provider argument: fd".to_owned())?;
+    documents_provider_ensure_share(profile, device, share)?;
+    crate::tailscale::taildrive_download_to_fd(profile, device, share, path, fd)?;
     Ok(serde_json::json!({}))
 }
 

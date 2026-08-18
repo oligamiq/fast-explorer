@@ -3,6 +3,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 #[cfg(not(target_os = "android"))]
 use std::process::Command;
+#[cfg(target_os = "android")]
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -480,6 +482,8 @@ fn taildrive_display_path(location: &TaildriveLocation) -> String {
 static ANDROID_HOME: OnceLock<PathBuf> = OnceLock::new();
 #[cfg(target_os = "android")]
 static ANDROID_STATE_DIR: OnceLock<PathBuf> = OnceLock::new();
+#[cfg(target_os = "android")]
+static ANDROID_LEGACY_CONFIG_LOADED: AtomicBool = AtomicBool::new(false);
 
 #[cfg(target_os = "android")]
 pub(crate) fn set_android_home(path: PathBuf) {
@@ -4389,20 +4393,28 @@ impl AppState {
             self.open_device_sync_settings();
             self.supabase.status = "Incoming device transfer opened from notification".to_owned();
         }
-        let Some(app) = self.android_app.as_ref() else {
+        let Some(app) = self.android_app.clone() else {
             return;
         };
-        self.android_insets = crate::android_platform::system_bar_insets(app);
-        self.android_window_width_dp = crate::android_platform::window_width_dp(app);
-        if let Ok(snapshot) = crate::android_platform::network_interfaces_json(app) {
+        self.android_insets = crate::android_platform::system_bar_insets(&app);
+        self.android_window_width_dp = crate::android_platform::window_width_dp(&app);
+        if let Ok(snapshot) = crate::android_platform::network_interfaces_json(&app) {
             let _ = crate::tailscale::set_android_interfaces_json(&snapshot);
         }
-        let granted = crate::android_platform::has_storage_access(app);
+        let granted = crate::android_platform::has_storage_access(&app);
         if granted && !self.android_storage_access {
             self.android_storage_access = true;
+            if !android_config_migration_complete() {
+                // Scoped storage may have hidden an old shared-storage config during
+                // the first launch after upgrading. Re-read settings now that access
+                // exists, then persist them privately; cleanup only removes the legacy
+                // file when load_settings actually imported it.
+                self.reload_settings();
+                self.persist_settings();
+            }
             if self.is_taildrive_current() {
                 self.refresh();
-            } else if let Ok(root) = crate::android_platform::shared_storage_root(app) {
+            } else if let Ok(root) = crate::android_platform::shared_storage_root(&app) {
                 self.active_tab_mut().set_current_dir(root);
                 self.persist_mobile_browsing_state();
             } else {
@@ -4795,6 +4807,7 @@ impl AppState {
         self.saved_remote_cache_settings = saved.remote_cache;
         self.path_overflow_behavior = saved.path_overflow_behavior;
         self.path_reset_delay_ms = saved.path_reset_delay_ms.clamp(500, 10_000);
+        self.pinned_paths = saved.pinned_paths.clone();
         self.confirm_mobile_delete = saved.confirm_mobile_delete;
         self.delete_warning_suppressed_until_ms = saved.delete_warning_suppressed_until_ms;
         self.refresh_remote_cache_usage();
@@ -6139,7 +6152,7 @@ impl AppState {
         match (event.command, event.result) {
             (LocalFileCommand::CreateDir { path, .. }, Ok(())) => {
                 #[cfg(target_os = "android")]
-                self.notify_android_file_changes(&[current.clone(), path.clone()]);
+                self.notify_android_file_changes(&[path.clone()]);
                 if active {
                     let rename = path
                         .file_name()
@@ -6161,12 +6174,6 @@ impl AppState {
                 },
                 Ok(()),
             ) => {
-                #[cfg(target_os = "android")]
-                self.notify_android_file_changes(&[
-                    current.clone(),
-                    source.clone(),
-                    destination.clone(),
-                ]);
                 if cut
                     && self
                         .file_clipboard
@@ -6182,7 +6189,7 @@ impl AppState {
             }
             (LocalFileCommand::Delete { path, .. }, Ok(())) => {
                 #[cfg(target_os = "android")]
-                self.notify_android_file_changes(&[current.clone(), path.clone()]);
+                self.notify_android_file_changes(&[path.clone()]);
                 if self
                     .file_clipboard
                     .as_ref()
@@ -6204,11 +6211,7 @@ impl AppState {
                 Ok(()),
             ) => {
                 #[cfg(target_os = "android")]
-                self.notify_android_file_changes(&[
-                    current.clone(),
-                    source.clone(),
-                    destination.clone(),
-                ]);
+                self.notify_android_file_changes(&[source.clone(), destination.clone()]);
                 if let Some(clipboard) = self.file_clipboard.as_mut()
                     && clipboard.path == source
                 {
@@ -6420,6 +6423,10 @@ impl AppState {
                 action,
                 result,
             } => {
+                #[cfg(target_os = "android")]
+                if result.is_ok() {
+                    self.notify_android_file_changes(&[current.archive_path.clone()]);
+                }
                 if self.active_tab().current_dir != crate::archive::virtual_path(&current) {
                     return;
                 }
@@ -6434,6 +6441,10 @@ impl AppState {
                 }
             }
             crate::archive::Event::EditSynced { location, result } => {
+                #[cfg(target_os = "android")]
+                if result.is_ok() {
+                    self.notify_android_file_changes(&[location.archive_path.clone()]);
+                }
                 if result.is_ok() {
                     if self.active_tab().current_dir
                         == crate::archive::virtual_path(&crate::archive::ArchiveLocation {
@@ -6457,6 +6468,10 @@ impl AppState {
                 size,
                 result,
             } => {
+                #[cfg(target_os = "android")]
+                if result.is_ok() && parse_taildrive_path(&target_location).is_none() {
+                    self.notify_android_file_changes(&[destination.clone()]);
+                }
                 if self.active_tab().current_dir != target_location {
                     return;
                 }
@@ -8348,7 +8363,58 @@ impl AppState {
 }
 
 pub fn perform_persist_command(command: &PersistCommand) -> Result<(), String> {
-    write_bytes_atomic(&command.path, &command.bytes)
+    write_bytes_atomic(&command.path, &command.bytes)?;
+    #[cfg(target_os = "android")]
+    cleanup_legacy_android_config_after_persist(&command.path);
+    Ok(())
+}
+
+#[cfg(target_os = "android")]
+fn cleanup_legacy_android_config_after_persist(persisted_path: &Path) {
+    let Some(current) = config_path() else {
+        return;
+    };
+    if current != persisted_path
+        || android_config_migration_complete()
+        || !ANDROID_LEGACY_CONFIG_LOADED.load(Ordering::Acquire)
+    {
+        return;
+    }
+    let Some(legacy) = legacy_android_config_path() else {
+        return;
+    };
+    if legacy == current {
+        return;
+    }
+
+    let legacy_removed = match fs::remove_file(&legacy) {
+        Ok(()) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => false,
+        Err(error) => {
+            eprintln!(
+                "FastExplorer: failed to remove legacy Android config {}: {error}",
+                legacy.display()
+            );
+            false
+        }
+    };
+    if !legacy_removed {
+        return;
+    }
+
+    match mark_android_config_migration_complete() {
+        Ok(()) => {
+            ANDROID_LEGACY_CONFIG_LOADED.store(false, Ordering::Release);
+            eprintln!(
+                "FastExplorer: migrated Android config from {} to app-private storage",
+                legacy.display()
+            );
+        }
+        Err(error) => eprintln!(
+            "FastExplorer: migrated legacy Android config but could not record completion: {error}"
+        ),
+    }
 }
 
 fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -9325,7 +9391,57 @@ fn supabase_session_path() -> Option<PathBuf> {
     })
 }
 
+#[cfg(target_os = "android")]
+fn legacy_android_config_path() -> Option<PathBuf> {
+    home_dir().map(|home| home.join(".config/fast-explorer/config.json"))
+}
+
+#[cfg(target_os = "android")]
+fn android_config_migration_marker_path() -> Option<PathBuf> {
+    ANDROID_STATE_DIR
+        .get()
+        .map(|state_dir| state_dir.join("legacy-config-migrated"))
+}
+
+#[cfg(target_os = "android")]
+fn android_config_migration_complete() -> bool {
+    android_config_migration_marker_path().is_some_and(|path| path.is_file())
+}
+
+#[cfg(target_os = "android")]
+fn backup_private_config_before_legacy_import(private_path: &Path) {
+    if !private_path.is_file() {
+        return;
+    }
+    let Some(state_dir) = ANDROID_STATE_DIR.get() else {
+        return;
+    };
+    let backup = state_dir.join("config.pre-legacy-migration.json");
+    if backup.exists() {
+        return;
+    }
+    if let Err(error) = fs::copy(private_path, &backup) {
+        eprintln!(
+            "FastExplorer: failed to preserve pre-migration Android config {}: {error}",
+            private_path.display()
+        );
+    }
+}
+
+#[cfg(target_os = "android")]
+fn mark_android_config_migration_complete() -> Result<(), String> {
+    let marker = android_config_migration_marker_path()
+        .ok_or_else(|| "Android state directory is unavailable".to_owned())?;
+    write_bytes_atomic(&marker, b"migrated\n")
+}
+
 fn config_path() -> Option<PathBuf> {
+    #[cfg(target_os = "android")]
+    if let Some(state_dir) = ANDROID_STATE_DIR.get() {
+        // App configuration must remain writable before all-files access is granted.
+        // Keep it in app-private storage alongside the Android session state.
+        return Some(state_dir.join("config.json"));
+    }
     #[cfg(target_os = "windows")]
     if let Some(config_home) = std::env::var_os("APPDATA") {
         return Some(PathBuf::from(config_home).join("FastExplorer/config.json"));
@@ -9336,11 +9452,50 @@ fn config_path() -> Option<PathBuf> {
     home_dir().map(|home| home.join(".config/fast-explorer/config.json"))
 }
 
-fn load_settings() -> Option<AppSettings> {
-    let text = fs::read_to_string(config_path()?).ok()?;
-    let mut settings = serde_json::from_str::<AppSettings>(&text).ok()?;
+fn parse_settings_text(text: &str) -> Option<AppSettings> {
+    let mut settings = serde_json::from_str::<AppSettings>(text).ok()?;
     settings.theme.intensity = settings.theme.intensity.min(100);
     Some(settings)
+}
+
+fn load_settings() -> Option<AppSettings> {
+    let path = config_path()?;
+
+    #[cfg(target_os = "android")]
+    if !android_config_migration_complete()
+        && let Some(legacy) = legacy_android_config_path()
+        && legacy != path
+    {
+        match fs::read_to_string(&legacy) {
+            Ok(text) => {
+                if let Some(settings) = parse_settings_text(&text) {
+                    // A previous launch may have synthesized a private config while
+                    // scoped-storage permission hid the legacy file. Preserve that
+                    // private copy before making the now-readable legacy settings
+                    // authoritative for the one-time migration.
+                    backup_private_config_before_legacy_import(&path);
+                    ANDROID_LEGACY_CONFIG_LOADED.store(true, Ordering::Release);
+                    return Some(settings);
+                }
+                eprintln!(
+                    "FastExplorer: legacy Android config {} is invalid; keeping private config",
+                    legacy.display()
+                );
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+                ) => {}
+            Err(error) => eprintln!(
+                "FastExplorer: cannot read legacy Android config {}: {error}",
+                legacy.display()
+            ),
+        }
+    }
+
+    let text = fs::read_to_string(path).ok()?;
+    parse_settings_text(&text)
 }
 
 fn save_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
@@ -9714,6 +9869,14 @@ mod tests {
             search_generation: 0,
             taildrive_generation: 0,
             remote_mutations: Vec::new(),
+            #[cfg(target_os = "android")]
+            android_app: None,
+            #[cfg(target_os = "android")]
+            android_storage_access: false,
+            #[cfg(target_os = "android")]
+            android_insets: crate::android_platform::SystemBarInsets::default(),
+            #[cfg(target_os = "android")]
+            android_window_width_dp: 360.0,
         }
     }
 
